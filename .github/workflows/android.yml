@@ -32,4 +32,4 @@ jobs:
         working-directory: android
         run: ./gradlew testHomemusicDebugUnitTest assembleHomemusicDebug assembleHomemusicRelease --console=plain
       - name: Inspect the public release APK
-        run: python3 scripts/check-public-apk.py android/app/build/outputs/apk/homemusic/release/app-homemusic-universal-release-unsigned.apk
+        run: python3 scripts/check-public-apk.py android/app/build/outputs/apk/homemusic/release/app-homemusic-release-unsigned.apk

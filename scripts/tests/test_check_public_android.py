@@ -1,6 +1,8 @@
 """Regression checks for accidental publication of private Android inputs."""
 
 import importlib.util
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,6 +13,30 @@ spec.loader.exec_module(public_android)
 
 
 class PublicationCheckTest(unittest.TestCase):
+    def test_upstream_version_tags_and_ssdp_multicast_are_not_deployment_addresses(self):
+        self.assertEqual([], public_android.check_file("android/CHANGELOG.md", b"prerelease v4.14.0.1"))
+        self.assertEqual([], public_android.check_file("android/app/upnp.kt", b'const val SSDP_HOST = "239.255.255.250"'))
+
+    def test_personal_email_and_bare_deployment_ip_are_rejected(self):
+        for text in (b'"private-person@domain.tld"', b'"10.20.30.40:8444"'):
+            with self.subTest(text=text):
+                self.assertTrue(public_android.check_file("android/app/fixture.kt", text))
+
+    def test_staged_secret_is_not_hidden_by_a_clean_working_file(self):
+        # Real Git is necessary here: the publication boundary is the staging area.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            path = root / "android" / "example.txt"
+            path.parent.mkdir()
+            path.write_bytes(b'https://user:password@hub.example.com')
+            subprocess.run(["git", "-C", str(root), "add", "--", "android"], check=True)
+            path.write_bytes(b'https://hub.example.com')
+            count, findings = public_android.check_repository(root)
+            self.assertEqual(count, 1)
+            self.assertTrue(any("credentials in a URL" in item for item in findings))
+            self.assertFalse(any("password" in item for item in findings))
+
     def test_local_signing_inputs_are_rejected_even_if_force_added(self):
         for name in ("android/keystore/release.jks", "android/keystore.properties", "android/homemusic.properties", "android/local.properties", "android/.git"):
             with self.subTest(name=name):

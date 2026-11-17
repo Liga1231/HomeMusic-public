@@ -8,7 +8,6 @@ local configuration or contact the configured music server.
 from __future__ import annotations
 
 import ipaddress
-import os
 import re
 import subprocess
 import sys
@@ -26,6 +25,8 @@ EXAMPLE_NETWORKS = tuple(ipaddress.ip_network(net) for net in (
     "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32",
 ))
 URL = re.compile(r"https?://[^\s<>\"'`)]+")
+IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+EMAIL = re.compile(r"(?<![\w.+-])[\w.%+-]+@([\w.-]+\.[A-Za-z]{2,})")
 PROFILE_PATH = re.compile(r"(?i)(?:[A-Z]:[\\/]Users[\\/]|/Users/|/home/)[^\s<>\"']+")
 PRIVATE_KEY = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----")
 
@@ -45,6 +46,20 @@ def check_file(name: str, data: bytes) -> list[str]:
         errors.append("private key material")
     if PROFILE_PATH.search(text):
         errors.append("personal profile path")
+    for match in EMAIL.finditer(text):
+        # Kotlin's this@Class.property is a qualified expression, not an email.
+        if match.group().startswith("this@"):
+            continue
+        domain = match.group(1).lower()
+        if domain not in {"example.com", "example.org", "example.net", "github.com", "users.noreply.github.com"} and not domain.endswith((".example", ".invalid", ".test")):
+            errors.append("personal email; use an example or GitHub noreply address")
+    for match in IPV4.finditer(text):
+        try:
+            address = ipaddress.ip_address(match.group())
+        except ValueError:
+            continue
+        if not (address.is_loopback or address.is_unspecified or address.is_multicast) and not any(address in net for net in EXAMPLE_NETWORKS if address.version == net.version):
+            errors.append("deployment IP; use a documentation address")
     for match in URL.finditer(text):
         try:
             parsed = urlsplit(match.group())
@@ -56,40 +71,48 @@ def check_file(name: str, data: bytes) -> list[str]:
                 address = ipaddress.ip_address(parsed.hostname)
             except ValueError:
                 continue
-            if not address.is_loopback and not any(address in net for net in EXAMPLE_NETWORKS if address.version == net.version):
+            if not (address.is_loopback or address.is_unspecified or address.is_multicast) and not any(address in net for net in EXAMPLE_NETWORKS if address.version == net.version):
                 errors.append("deployment IP in a URL; use a documentation address")
         except ValueError:
             errors.append("malformed URL")
     return sorted(set(errors))
 
 
-def main() -> int:
-    root = Path(__file__).resolve().parents[1]
+def check_repository(root: Path) -> tuple[int, list[str]]:
+    """Inspect staged blobs, including content hidden by later working-tree edits."""
     rows = subprocess.check_output(["git", "-C", str(root), "ls-files", "--stage", "-z", "--", "android"]).split(b"\0")
     count = 0
     findings = []
-    for row in rows:
-        if not row:
-            continue
-        metadata, name_bytes = row.split(b"\t", 1)
-        name = name_bytes.decode("utf-8")
-        count += 1
-        if metadata.split()[0] == b"160000":
-            findings.append(f"{name}: nested Git repository; publish actual source files")
-            continue
-        path = root.joinpath(*PurePosixPath(name).parts)
-        if metadata.split()[0] == b"120000":
-            # Git may check out a symlink as plain text on Windows.
-            target = os.readlink(path) if path.is_symlink() else path.read_text(encoding="utf-8")
-            if "\\" in target or ":" in target or not (path.parent / target).resolve().is_relative_to(root / "android"):
-                findings.append(f"{name}: symlink escapes the Android source tree")
-            continue
-        if not path.is_file():
-            findings.append(f"{name}: tracked file is missing")
-            continue
-        findings.extend(f"{name}: {reason}" for reason in check_file(name, path.read_bytes()))
+    with subprocess.Popen(["git", "-C", str(root), "cat-file", "--batch"], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as objects:
+        for row in rows:
+            if not row:
+                continue
+            metadata, name_bytes = row.split(b"\t", 1)
+            mode, oid, stage = metadata.split()
+            name = name_bytes.decode("utf-8")
+            count += 1
+            if mode == b"160000" or stage != b"0":
+                findings.append(f"{name}: nested Git repository or unresolved conflict")
+                continue
+            objects.stdin.write(oid + b"\n")
+            objects.stdin.flush()
+            header = objects.stdout.readline().split()
+            data = objects.stdout.read(int(header[2]))
+            objects.stdout.read(1)
+            if mode == b"120000":
+                # Preserve the single upstream locale alias, without trusting local symlinks.
+                if name != "android/app/src/main/res/values-zh-rCN" or data != b"values-zh":
+                    findings.append(f"{name}: unexpected symlink in public sources")
+                continue
+            findings.extend(f"{name}: {reason}" for reason in check_file(name, data))
+        objects.stdin.close()
     if not count:
         findings.append("No tracked Android sources found; stage the snapshot before checking it.")
+    return count, findings
+
+
+def main() -> int:
+    count, findings = check_repository(Path(__file__).resolve().parents[1])
     if findings:
         print("Public Android source check failed:", file=sys.stderr)
         print("\n".join(findings), file=sys.stderr)

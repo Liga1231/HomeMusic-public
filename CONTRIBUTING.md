@@ -25,6 +25,8 @@ PWA с мок-бэкендом: `npm --prefix web run dev:mock` (пароль `t
 
 ## Тесты и проверки
 
+- Android: из `android/` запустите `./gradlew testHomemusicDebugUnitTest assembleHomemusicDebug`
+  (Windows: `.\gradlew.bat`). Настройка сборки — в [android/README.md](android/README.md).
 - Тесты Хаба проходят целиком (команды — в разделе «Разработка» `README.md`; тестам с ffmpeg нужен Docker).
 - PWA собирается: `npm --prefix web run build` (включает проверку типов).
 - Новое поведение покрыто тестами; изменённое поведение — переписанными тестами. Удалять, пропускать или ослаблять
@@ -46,6 +48,9 @@ PWA с мок-бэкендом: `npm --prefix web run dev:mock` (пароль `t
 <a id="cla"></a>
 
 ## Соглашение участника (CLA)
+
+Для Android-клиента действуют [android/LICENSE](android/LICENSE) и [android/CONTRIBUTING.md](android/CONTRIBUTING.md).
+Соглашение ниже не меняет лицензию Android-клиента и не предоставляет прав на код сторонних авторов.
 
 Версия 1 от 17 ноября 2026 г.
 

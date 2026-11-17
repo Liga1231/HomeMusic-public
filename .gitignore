@@ -23,6 +23,7 @@ hub/app/static/
 # local data
 .agent-work/
 data/
+/release/
 eval/screenshots/
 eval/results/
 # manual design-review screenshots (only screenshot-test baselines go into git)

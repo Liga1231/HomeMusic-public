@@ -113,7 +113,7 @@ android {
         // HomeMusic fork: degoogled base (no Google services) + Hub integration.
         homemusic {
             dimension = "default"
-            applicationId = "app.homemusic"
+            applicationId = "app.homemusic.selfhost"
             // Own version line; -PhmVersionCode / -PhmVersionName override it for test builds.
             versionCode Integer.parseInt((project.findProperty('hmVersionCode') ?: '1').toString())
             versionName((project.findProperty('hmVersionName') ?: '1.0.0').toString())

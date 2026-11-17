@@ -6,6 +6,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
+import android.webkit.CookieManager
 import androidx.activity.OnBackPressedCallback
 import androidx.annotation.OptIn
 import androidx.core.view.ViewCompat
@@ -25,6 +26,7 @@ import com.eddyizm.tempus.repository.PlaylistRepository
 import com.eddyizm.tempus.repository.ServerRepository
 import com.eddyizm.tempus.repository.SystemRepository
 import com.eddyizm.tempus.ui.activity.MainActivity
+import com.eddyizm.tempus.ui.fragment.LoginFragment
 import com.eddyizm.tempus.util.Flavors
 import com.eddyizm.tempus.util.Preferences
 import com.google.android.material.textfield.TextInputLayout
@@ -46,6 +48,7 @@ class HomeLogin private constructor(private val fragment: Fragment, private val 
 
     private var step = Step.SERVER
     private var server = ""
+    private var hubServer = ""
     private var options: HubAuthOptions? = null
     private var googleToken: String? = null
     private var googleEmail: String? = null
@@ -77,7 +80,13 @@ class HomeLogin private constructor(private val fragment: Fragment, private val 
         }
 
         b.hmLoginServer.setText(BuildConfig.MUSIC_URL)
-        b.hmLoginServer.doAfterTextChanged { updateServerReset(); clearError() }
+        b.hmLoginHub.setText(BuildConfig.HUB_URL)
+        b.hmLoginServer.doAfterTextChanged {
+            updateServerReset()
+            b.hmLoginHubLayout.placeholderText = LocalServers.music(it.toString())?.let(LocalServers::suggestedHub)
+            clearError()
+        }
+        b.hmLoginHub.doAfterTextChanged { clearError() }
         b.hmLoginServerDefault.setOnClickListener { b.hmLoginServer.setText(BuildConfig.MUSIC_URL) }
         listOf(b.hmLoginCode, b.hmLoginUser, b.hmLoginPassword, b.hmLoginPassword2).forEach { field ->
             field.doAfterTextChanged { clearError() }
@@ -92,6 +101,7 @@ class HomeLogin private constructor(private val fragment: Fragment, private val 
         }
         onGo(b.hmLoginEmail) { if (emailSent == null) primary() }
         onGo(b.hmLoginServer) { primary() }
+        onGo(b.hmLoginHub) { primary() }
         onGo(b.hmLoginPassword) { if (step == Step.ACCOUNT) primary() }
         onGo(b.hmLoginPassword2) { primary() }
 
@@ -108,8 +118,11 @@ class HomeLogin private constructor(private val fragment: Fragment, private val 
             val last = saved.maxByOrNull { it.timestamp } ?: return@observe
             if (step == Step.SERVER && b.hmLoginServer.text.toString() == BuildConfig.MUSIC_URL) {
                 b.hmLoginServer.setText(last.address)
+                if (HubConfig.isBoundTo(last.address)) b.hmLoginHub.setText(HubConfig.remoteUrl())
             }
-            if (b.hmLoginUser.text.isNullOrEmpty()) b.hmLoginUser.setText(last.username)
+            val selected = LocalServers.music(b.hmLoginServer.text.toString())
+            if (b.hmLoginUser.text.isNullOrEmpty()) saved.firstOrNull { LocalServers.same(it.address, selected) }
+                ?.let { b.hmLoginUser.setText(it.username) }
         }
 
         // Back walks the steps; on the first one it leaves as usual
@@ -218,10 +231,7 @@ class HomeLogin private constructor(private val fragment: Fragment, private val 
 
     /** The Hub answered and its accounts are for this server: registration and Google make sense. */
     private fun hubOffers(): Boolean {
-        val o = options ?: return false
-        if (!o.invites) return false
-        val music = o.musicUrl?.takeIf { it.isNotBlank() } ?: BuildConfig.MUSIC_URL
-        return sameServer(server, music) || sameServer(server, BuildConfig.MUSIC_LOCAL_URL)
+        return options?.invites == true && hubServer.isNotBlank()
     }
 
     private fun setBusy(value: Boolean) {
@@ -229,7 +239,7 @@ class HomeLogin private constructor(private val fragment: Fragment, private val 
         b.hmLoginProgress.visibility = if (value) View.VISIBLE else View.INVISIBLE
         listOf(b.hmLoginPrimary, b.hmLoginGoogle, b.hmLoginSwitch, b.hmLoginEmailSwitch, b.hmLoginServerRow,
             b.hmLoginServerDefault).forEach { it.isEnabled = !value }
-        listOf(b.hmLoginServer, b.hmLoginEmail, b.hmLoginCode, b.hmLoginUser, b.hmLoginPassword, b.hmLoginPassword2)
+        listOf(b.hmLoginServer, b.hmLoginHub, b.hmLoginEmail, b.hmLoginCode, b.hmLoginUser, b.hmLoginPassword, b.hmLoginPassword2)
             .forEach { it.isEnabled = !value }
         updateResend()
     }
@@ -241,7 +251,7 @@ class HomeLogin private constructor(private val fragment: Fragment, private val 
 
     private fun clearError() {
         showError(null)
-        listOf(b.hmLoginServerLayout, b.hmLoginEmailLayout, b.hmLoginCodeLayout, b.hmLoginUserLayout,
+        listOf(b.hmLoginServerLayout, b.hmLoginHubLayout, b.hmLoginEmailLayout, b.hmLoginCodeLayout, b.hmLoginUserLayout,
             b.hmLoginPasswordLayout, b.hmLoginPassword2Layout).forEach { it.error = null }
     }
 
@@ -272,28 +282,57 @@ class HomeLogin private constructor(private val fragment: Fragment, private val 
     // --- step 1: the server -----------------------------------------------------------------
 
     private fun checkServer() {
-        val address = normalizeServer(b.hmLoginServer.text.toString())
+        val address = LocalServers.music(b.hmLoginServer.text.toString())
         if (address == null) {
             b.hmLoginServerLayout.error = str(R.string.homemusic_login_server_bad)
             return
         }
+        val hub = if (b.hmLoginHub.text.isNullOrBlank()) LocalServers.suggestedHub(address)
+        else LocalServers.hub(b.hmLoginHub.text.toString())
+        if (hub == null) {
+            b.hmLoginHubLayout.error = str(R.string.homemusic_login_hub_bad)
+            return
+        }
+        (fragment as LoginFragment).withLocalNetworkPermission(
+            { if (alive()) checkEndpoints(address, hub) },
+            { if (alive()) b.hmLoginServerLayout.error = str(R.string.homemusic_login_lan_permission) },
+        )
+    }
+
+    private fun checkEndpoints(address: String, hub: String) {
         setBusy(true)
         HomeMusic.io.execute {
             val result = probe(address)
             // the Hub's options decide whether to offer registration and Google; no Hub — sign-in still works
-            val opts = if (result == PROBE_OK) runCatching { HubClient.authOptions() }.getOrNull() else null
+            val opts = if (result == PROBE_OK) runCatching { HubClient.authOptionsAt(hub) }.getOrNull() else null
             HomeMusic.main.post {
                 if (!alive()) return@post
-                setBusy(false)
                 when (result) {
                     PROBE_OK -> {
-                        server = address
-                        options = opts
-                        b.hmLoginServer.setText(address)
-                        show(Step.ACCOUNT)
+                        // The new deployment must never inherit another server's credentials or Hub fallback.
+                        resetPreferences()
+                        HubWebHolder.destroy()
+                        CookieManager.getInstance().removeAllCookies {
+                            if (!alive()) return@removeAllCookies
+                            if (!LocalServers.same(server, address) || !LocalServers.same(hubServer, hub)) {
+                                listOf(b.hmLoginUser, b.hmLoginPassword, b.hmLoginPassword2, b.hmLoginEmail, b.hmLoginCode)
+                                    .forEach { it.text = null }
+                                emailSent = null
+                                resendAt = 0L
+                            }
+                            CookieManager.getInstance().flush()
+                            HubConfig.selectServer(address, hub)
+                            server = address
+                            hubServer = hub
+                            options = opts
+                            b.hmLoginServer.setText(address)
+                            b.hmLoginHub.setText(hub)
+                            setBusy(false)
+                            show(Step.ACCOUNT)
+                        }
                     }
-                    PROBE_NOT_MUSIC -> b.hmLoginServerLayout.error = str(R.string.homemusic_login_server_not_music)
-                    else -> b.hmLoginServerLayout.error = str(R.string.homemusic_login_server_unreachable)
+                    PROBE_NOT_MUSIC -> { setBusy(false); b.hmLoginServerLayout.error = str(R.string.homemusic_login_server_not_music) }
+                    else -> { setBusy(false); b.hmLoginServerLayout.error = str(R.string.homemusic_login_server_unreachable) }
                 }
             }
         }
@@ -417,8 +456,16 @@ class HomeLogin private constructor(private val fragment: Fragment, private val 
 
     private fun signIn(user: String, password: String) {
         setBusy(true)
-        val existing = saved.firstOrNull { sameServer(it.address, server) && it.username == user }
-        val local = if (sameServer(server, BuildConfig.MUSIC_URL)) BuildConfig.MUSIC_LOCAL_URL.ifEmpty { null } else existing?.localAddress
+        CookieManager.getInstance().removeAllCookies {
+            if (!alive()) return@removeAllCookies
+            HubClient.invalidate()
+            signInWithCleanSession(user, password)
+        }
+    }
+
+    private fun signInWithCleanSession(user: String, password: String) {
+        val existing = saved.firstOrNull { LocalServers.same(it.address, server) && it.username == user }
+        val local: String? = null
         val account = Server(
             serverId = existing?.serverId ?: UUID.randomUUID().toString(),
             serverName = existing?.serverName ?: "HomeMusic",
@@ -521,6 +568,7 @@ class HomeLogin private constructor(private val fragment: Fragment, private val 
         /** Is there a Subsonic server at [address]? Its ping answers even without credentials. */
         private fun probe(address: String): Int {
             val client = HubClient.http.newBuilder().cookieJar(CookieJar.NO_COOKIES)
+                .followRedirects(false).followSslRedirects(false)
                 .callTimeout(15, TimeUnit.SECONDS).build()
             val request = Request.Builder().url("$address/rest/ping.view?v=1.16.1&c=HomeMusic&f=json").build()
             return try {

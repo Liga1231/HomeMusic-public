@@ -157,15 +157,25 @@ object HubClient {
     val gson = Gson()
 
     private val cookieJar = WebViewCookieJar()
+    private val loginEndpoint = ThreadLocal<String>()
+    private val loginHttp: OkHttpClient by lazy {
+        http.newBuilder().cookieJar(CookieJar.NO_COOKIES).followRedirects(false).followSslRedirects(false).build()
+    }
     private data class AccountSession(val base: String, val cookie: String)
+    private data class NativeSession(val target: HubLoginTarget, val cookie: String)
+    @Volatile private var nativeSession: NativeSession? = null
     private val accountSession = ThreadLocal<AccountSession>()
-    private val fixedCookieHttp: OkHttpClient by lazy { http.newBuilder().cookieJar(CookieJar.NO_COOKIES).build() }
+    private val fixedCookieHttp: OkHttpClient by lazy {
+        http.newBuilder().cookieJar(CookieJar.NO_COOKIES).followRedirects(false).followSslRedirects(false).build()
+    }
 
     internal fun <T> withAccountSession(account: String, block: () -> T): T {
         return withVerifiedAccount(account, CatalogFavorites::currentAccount, {
             ensureSession()
             val base = baseUrl()
-            AccountSession(base, CookieManager.getInstance().getCookie(base) ?: throw IOException("Hub session unavailable"))
+            val session = nativeSession?.takeIf { it.target == HubConfig.loginTarget(base) }
+                ?: throw IOException("Hub session unavailable")
+            AccountSession(base, session.cookie)
         }, { snapshot ->
             val me = fixedCookieHttp.newCall(Request.Builder().url("${snapshot.base}/api/auth/me")
                 .header("Cookie", snapshot.cookie).build()).execute().use { response ->
@@ -205,9 +215,9 @@ object HubClient {
     @WorkerThread
     fun baseUrl(): String {
         val now = SystemClock.elapsedRealtime()
-        resolvedBase?.let { if (now - resolvedAt < BASE_TTL_MS) return it }
         val remote = HubConfig.remoteUrl()
         val local = HubConfig.localUrl()
+        resolvedBase?.let { if (it in listOf(remote, local) && now - resolvedAt < BASE_TTL_MS) return it }
         val base = if (local != null && local != remote && reachable(local)) local else remote
         if (base.isEmpty()) throw HubException("Не задан адрес Хаба — укажите его в настройках")
         resolvedBase = base
@@ -223,6 +233,7 @@ object HubClient {
     fun invalidate() {
         resolvedBase = null
         capabilityBase = null
+        nativeSession = null
     }
 
     @Volatile private var capabilityBase: String? = null
@@ -275,9 +286,14 @@ object HubClient {
     @WorkerThread
     @Throws(IOException::class)
     fun ensureSession(): HubMe {
+        if (!HubConfig.isBoundTo(Preferences.getServer())) {
+            throw HubException("Сначала выберите сервер HomeMusic на экране входа", 401)
+        }
         val base = baseUrl()
+        val target = HubConfig.loginTarget(base) ?: throw HubException("Сначала войдите в выбранный сервер", 401)
         val me = try {
-            http.newCall(Request.Builder().url("$base/api/auth/me").build()).execute().use { r ->
+            val request = authenticatedRequest(Request.Builder().url("$base/api/auth/me").build(), target)
+            fixedCookieHttp.newCall(request).execute().use { r ->
                 when {
                     r.isSuccessful -> parse(r, HubMe::class.java)
                     r.code == 401 -> null
@@ -291,23 +307,42 @@ object HubClient {
             invalidate()
             throw HubException("Хаб недоступен: ${e.message ?: e.javaClass.simpleName}")
         }
-        return me ?: login(base)
+        if (HubConfig.loginTarget(base) != target) throw HubException("Выбран другой сервер или аккаунт", 401)
+        return me?.takeIf { it.username == target.username } ?: login(base, target)
     }
 
     @WorkerThread
     @Throws(IOException::class)
-    private fun login(base: String): HubMe {
-        val user = Preferences.getUser()
-        val password = Preferences.getPassword()
-        if (user.isNullOrEmpty() || password.isNullOrEmpty()) {
-            throw HubException("Сначала войдите в аккаунт Navidrome — Хаб использует ту же учётную запись", 401)
+    private fun login(base: String, target: HubLoginTarget): HubMe {
+        if (HubConfig.loginTarget(base) != target) {
+            throw HubException("Выбран другой сервер или аккаунт", 401)
         }
-        val body = gson.toJson(mapOf("username" to user, "password" to password)).toRequestBody(JSON)
-        http.newCall(Request.Builder().url("$base/api/auth/login").post(body).build()).execute().use { r ->
+        val body = gson.toJson(mapOf("username" to target.username, "password" to target.password)).toRequestBody(JSON)
+        val request = Request.Builder().url("$base/api/auth/login").post(body).build()
+        loginHttp.newCall(request).execute().use { r ->
             if (!r.isSuccessful) throw error(r)
+            if (HubConfig.loginTarget(base) != target) throw HubException("Выбран другой сервер или аккаунт", 401)
+            val cookies = Cookie.parseAll(request.url, r.headers)
+            val cookie = cookies.joinToString("; ") { "${it.name}=${it.value}" }
+            if (cookie.isEmpty()) throw HubException("Хаб не создал сессию", 401)
+            val me = parse(r, HubMe::class.java)
+            if (me.username != target.username) throw HubException("Хаб вернул другой аккаунт", 401)
+            nativeSession = NativeSession(target, cookie)
+            cookieJar.saveFromResponse(request.url, cookies)
             flushCookies()
-            return parse(r, HubMe::class.java)
+            return me
         }
+    }
+
+    /** Cookies are captured with their exact server/account, never loaded from a shared host cookie jar. */
+    private fun authenticatedRequest(request: Request, target: HubLoginTarget): Request {
+        var session = nativeSession?.takeIf { it.target == target }
+        if (session == null) {
+            login(target.base, target)
+            session = nativeSession?.takeIf { it.target == target } ?: throw HubException("Сессия изменилась", 401)
+        }
+        if (HubConfig.loginTarget(target.base) != target) throw HubException("Выбран другой сервер или аккаунт", 401)
+        return request.newBuilder().header("Cookie", session.cookie).build()
     }
 
     // --- accounts (the sign-in screen: no session yet) --------------------------------------
@@ -316,6 +351,12 @@ object HubClient {
     @WorkerThread
     @Throws(IOException::class)
     fun authOptions(): HubAuthOptions = post(null, "/api/auth/options", HubAuthOptions::class.java)
+
+    /** An explicit server probe before login: no saved address, cookies or redirects. */
+    fun authOptionsAt(base: String): HubAuthOptions {
+        loginEndpoint.set(base)
+        return try { authOptions() } finally { loginEndpoint.remove() }
+    }
 
     /** A new account by an invite code; signs in to the Hub too (the cookie). */
     @JvmStatic
@@ -368,12 +409,15 @@ object HubClient {
 
     /** GET when [body] is null, else POST of it as JSON; no session needed. */
     private fun <T> post(body: Any?, path: String, type: Class<T>): T {
-        val base = baseUrl()
+        val explicitProbe = loginEndpoint.get()
+        val base = explicitProbe ?: baseUrl()
         val request = Request.Builder().url("$base$path")
         if (body != null) request.post(gson.toJson(body).toRequestBody(JSON))
+        val prepared = request.build()
         try {
-            http.newCall(request.build()).execute().use { r ->
+            loginHttp.newCall(prepared).execute().use { r ->
                 if (!r.isSuccessful) throw error(r)
+                if (explicitProbe == null) cookieJar.saveFromResponse(prepared.url, Cookie.parseAll(prepared.url, r.headers))
                 flushCookies()
                 return parse(r, type)
             }
@@ -394,11 +438,16 @@ object HubClient {
             return fixedCookieHttp.newCall(request).execute().use { if (!it.isSuccessful) throw error(it); handle(it) }
         }
         val base = baseUrl()
-        val first = http.newCall(build(base)).execute()
+        val target = HubConfig.loginTarget(base) ?: throw HubException("Сначала войдите в выбранный сервер", 401)
+        val first = fixedCookieHttp.newCall(authenticatedRequest(build(base), target)).execute()
+        if (HubConfig.loginTarget(base) != target) {
+            first.close()
+            throw HubException("Выбран другой сервер или аккаунт", 401)
+        }
         if (first.code != 401) return first.use { if (!it.isSuccessful) throw error(it); handle(it) }
         first.close()
-        login(base)
-        return http.newCall(build(base)).execute().use { if (!it.isSuccessful) throw error(it); handle(it) }
+        login(base, target)
+        return fixedCookieHttp.newCall(authenticatedRequest(build(base), target)).execute().use { if (!it.isSuccessful) throw error(it); handle(it) }
     }
 
     // --- API --------------------------------------------------------------------------------

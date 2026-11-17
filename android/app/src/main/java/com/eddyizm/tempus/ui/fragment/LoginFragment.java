@@ -2,6 +2,8 @@ package com.eddyizm.tempus.ui.fragment;
 
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.Menu;
@@ -13,6 +15,9 @@ import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
@@ -47,6 +52,27 @@ public class LoginFragment extends Fragment implements ClickCallback {
     private LoginViewModel loginViewModel;
 
     private ServerAdapter serverAdapter;
+    private Runnable localNetworkGranted;
+    private Runnable localNetworkDenied;
+    private final ActivityResultLauncher<String> localNetworkPermission = registerForActivityResult(
+            new ActivityResultContracts.RequestPermission(), granted -> {
+                Runnable callback = granted ? localNetworkGranted : localNetworkDenied;
+                localNetworkGranted = null;
+                localNetworkDenied = null;
+                if (callback != null && getView() != null) callback.run();
+            });
+
+    /** The server is chosen before Android 17's LAN permission prompt or any connection. */
+    public void withLocalNetworkPermission(Runnable granted, Runnable denied) {
+        String permission = "android.permission.ACCESS_LOCAL_NETWORK";
+        if (Build.VERSION.SDK_INT < 37 || ContextCompat.checkSelfPermission(requireContext(), permission) == PackageManager.PERMISSION_GRANTED) {
+            granted.run();
+            return;
+        }
+        localNetworkGranted = granted;
+        localNetworkDenied = denied;
+        localNetworkPermission.launch(permission);
+    }
 
     @Override
     public void onCreate(@Nullable Bundle savedInstanceState) {
@@ -84,6 +110,8 @@ public class LoginFragment extends Fragment implements ClickCallback {
     @Override
     public void onDestroyView() {
         super.onDestroyView();
+        localNetworkGranted = null;
+        localNetworkDenied = null;
         bind = null;
     }
 

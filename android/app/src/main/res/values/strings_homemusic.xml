@@ -17,7 +17,7 @@
 
     <string name="homemusic_settings_title">HomeMusic</string>
     <string name="homemusic_settings_hub_url">Адрес Хаба</string>
-    <string name="homemusic_settings_hub_url_dialog">Адрес Хаба через интернет, например https://203.0.113.10:8445</string>
+    <string name="homemusic_settings_hub_url_dialog">Адрес Хаба на вашем сервере, например http://music-pc.local:8080</string>
     <string name="homemusic_settings_hub_local_url">Домашний адрес Хаба</string>
     <string name="homemusic_settings_hub_local_url_dialog">Используется, когда отвечает (дома по Wi-Fi). Оставьте пустым, чтобы всегда ходить через интернет</string>
     <string name="homemusic_settings_local_none">Не используется</string>
@@ -126,13 +126,13 @@
 
     <!-- sign-in -->
     <string name="homemusic_login_title">HomeMusic</string>
-    <string name="homemusic_login_server_subtitle">Выберите сервер с музыкой</string>
-    <string name="homemusic_login_server">Адрес сервера</string>
-    <string name="homemusic_login_server_helper">Обычно менять не нужно — это сервер HomeMusic</string>
+    <string name="homemusic_login_server_subtitle">Выберите свой сервер HomeMusic</string>
+    <string name="homemusic_login_server">Navidrome: IP или адрес сервера</string>
+    <string name="homemusic_login_server_helper">Укажите IP или имя ПК в своей сети. Без порта используется 4533.</string>
     <string name="homemusic_login_server_reset">Вернуть адрес по умолчанию</string>
     <string name="homemusic_login_next">Далее</string>
-    <string name="homemusic_login_server_bad">Это не адрес сервера: например, https://203.0.113.10:8444</string>
-    <string name="homemusic_login_server_unreachable">Сервер не отвечает. Проверьте адрес и интернет</string>
+    <string name="homemusic_login_server_bad">Укажите IP или адрес Navidrome, например http://music-pc.local:4533</string>
+    <string name="homemusic_login_server_unreachable">Сервер не отвечает. Проверьте адрес и подключение к своей сети</string>
     <string name="homemusic_login_server_not_music">По этому адресу нет сервера музыки</string>
     <string name="homemusic_login_account_subtitle">Войдите в свой аккаунт</string>
     <string name="homemusic_login_register_subtitle">Новый аккаунт по коду приглашения</string>
@@ -245,4 +245,8 @@
     </plurals>
     <string name="track_info_source">Источник</string>
     <string name="homemusic_full_track_unavailable">Полная версия песни пока недоступна. Попробуйте позже.</string>
+    <string name="homemusic_login_hub">Адрес Хаба</string>
+    <string name="homemusic_login_hub_helper">Если поле пустое — тот же ПК, порт 8080. При другом порте укажите полный адрес.</string>
+    <string name="homemusic_login_hub_bad">Укажите адрес Хаба, например http://music-pc.local:8080</string>
+    <string name="homemusic_login_lan_permission">Для подключения к своему серверу разрешите приложению доступ к локальной сети.</string>
 </resources>

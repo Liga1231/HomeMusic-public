@@ -4,6 +4,7 @@
 
     <!-- Stage 4.6: install updates downloaded from the Hub -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
     <application>
         <!-- Stage 4.4: Android «Поделиться» → Hub (screenshots → assistant, audio → upload form, links → assistant) -->

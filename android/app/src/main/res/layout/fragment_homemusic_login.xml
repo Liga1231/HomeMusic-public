@@ -61,6 +61,25 @@
                     android:id="@+id/hm_login_server"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:imeOptions="actionNext"
+                    android:inputType="textUri"
+                    android:singleLine="true" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.textfield.TextInputLayout
+                android:id="@+id/hm_login_hub_layout"
+                style="@style/HomeMusicLoginField"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:hint="@string/homemusic_login_hub"
+                app:helperText="@string/homemusic_login_hub_helper"
+                app:endIconMode="clear_text">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/hm_login_hub"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
                     android:imeOptions="actionGo"
                     android:inputType="textUri"
                     android:singleLine="true" />

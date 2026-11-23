@@ -5,9 +5,9 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/HomeMusic-public/embedder
-Environment=DATA_DIR=/root/HomeMusic-public/embedder/data
-Environment=MODELS_DIR=/root/HomeMusic-public/embedder/models
+WorkingDirectory=/opt/HomeMusic/embedder
+Environment=DATA_DIR=/opt/HomeMusic/embedder/data
+Environment=MODELS_DIR=/opt/HomeMusic/embedder/models
 Environment=MUSIC_ROOT=/opt/music/library
 Environment=EMBEDDER_MODEL=muq-mulan
 Environment=EMBEDDER_DEVICE=cpu

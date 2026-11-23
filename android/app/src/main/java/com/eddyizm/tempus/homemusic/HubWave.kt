@@ -16,6 +16,7 @@ import com.eddyizm.tempus.subsonic.models.Child
 import com.eddyizm.tempus.subsonic.utils.CacheUtil
 import com.eddyizm.tempus.ui.activity.MainActivity
 import com.eddyizm.tempus.util.MappingUtil
+import com.eddyizm.tempus.util.Preferences
 import java.lang.ref.WeakReference
 
 /**
@@ -58,6 +59,10 @@ object HubWave {
         val wave = WaveSession(id, out.title, out.seed, out.mode)
         wave.register(tracks)
         session = wave
+        // Media3's own shuffle is off: the Hub's order is the queue's order, and a new track must land after the
+        // ones already ahead, not at a random place of the play order.
+        Preferences.setShuffleModeEnabled(false)
+        target.get()?.livePlayer()?.shuffleModeEnabled = false
         // the start of its first track asks for what follows
         HubPlayer.playQueue(activity, tracks.map { it.item(wave.context) }, 0)
     }
@@ -219,6 +224,12 @@ object HubWave {
             .filter { wave.isWave(it.second) }
     }
 
+    /** The wave's queue entries behind the one playing: skipped past, but still in the queue ([WaveNextIn.held]). */
+    private fun behind(player: Player, wave: WaveSession): List<String> {
+        val current = player.currentMediaItemIndex.coerceAtLeast(0)
+        return (0 until current).map { player.getMediaItemAt(it).mediaId }.filter { wave.isWave(it) }
+    }
+
     private fun ask() {
         val wave = session ?: return
         if (wave.inFlight) {
@@ -227,7 +238,7 @@ object HubWave {
         }
         val player = player(wave) ?: return
         cancelRetry()
-        val request = wave.snapshot(ahead(player, wave).map { it.second })
+        val request = wave.snapshot(ahead(player, wave).map { it.second }, behind(player, wave))
         val id = wave.id
         wave.askedFor = player.currentMediaItem?.mediaId
         wave.inFlight = true
@@ -297,7 +308,8 @@ object HubWave {
         val queue = target.get() ?: return
         val player = player(wave) ?: return
         val ahead = ahead(player, wave)
-        val plan = WavePlan.of(ahead.map { wave.refOf(it.second).orEmpty() }, prepared.map { it.track.ref.orEmpty() })
+        val held = behind(player, wave).mapNotNull { wave.refOf(it) }.toSet()
+        val plan = WavePlan.of(ahead.map { wave.refOf(it.second).orEmpty() }, prepared.map { it.track.ref.orEmpty() }, held)
         val add = plan.add.map { prepared[it] }
         Log.i(TAG, "next ${wave.id}: ahead ${ahead.map { wave.refOf(it.second) }} → ${prepared.map { it.track.ref }} (kept ${plan.keep})")
         if (plan.remove.isEmpty() && add.isEmpty()) return

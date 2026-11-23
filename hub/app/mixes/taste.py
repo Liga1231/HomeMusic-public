@@ -198,18 +198,47 @@ async def _catalog_info(refs: list[str]) -> dict[str, CatalogTrack]:
     return {r: t for r, t in await asyncio.gather(*(one(r) for r in refs)) if t is not None}
 
 
+_v2_profile_cache: dict[int, tuple[float, Any]] = {}
+_profile_epoch: dict[int, int] = {}
+_profile_epoch_all = 0
+
+
+def invalidate_profile_cache(user_id: int | None = None) -> None:
+    global _profile_epoch_all
+    _profile_epoch_all += 1
+    if user_id is None:
+        _v2_profile_cache.clear()
+    else:
+        _v2_profile_cache.pop(user_id, None)
+        _profile_epoch[user_id] = _profile_epoch.get(user_id, 0) + 1
+
+
+def profile_epoch(user_id: int) -> int:
+    """Changes whenever the user's taste decisions changed: a holder of a built profile compares against it."""
+    return _profile_epoch_all + _profile_epoch.get(user_id, 0)
+
 async def build_profile(s: AsyncSession, user: User, now: datetime | None = None,
                         starred: list[dict[str, Any]] | None = None, *, model: str = "v1",
                         timezone: str | None = None) -> Profile:
     """v1 scoring with permanent, deduplicated favorite state. `starred` is an optional successful snapshot."""
     now = now or utcnow()
     if model == "v2":
+        import time as _time
+        _now_m = _time.monotonic()
+        if starred is None and user.id in _v2_profile_cache:
+            _ts, _cached_prof = _v2_profile_cache[user.id]
+            if _now_m - _ts < 3600:  # 1 hour in-memory cache
+                return _cached_prof
+
         from app.config import get_settings
         from app.mixes.taste_math import calculate_profile
         from app.mixes.taste_snapshot import load_snapshot
 
-        return calculate_profile(await load_snapshot(s, user.id, now=now), now=now,
-                                 timezone=timezone or get_settings().timezone)
+        _prof = calculate_profile(await load_snapshot(s, user.id, now=now), now=now,
+                                  timezone=timezone or get_settings().timezone)
+        if starred is None:
+            _v2_profile_cache[user.id] = (_now_m, _prof)
+        return _prof
     if model != "v1":
         raise ValueError("online taste model must be v1 or v2")
     p = Profile(user_id=user.id, now=now)

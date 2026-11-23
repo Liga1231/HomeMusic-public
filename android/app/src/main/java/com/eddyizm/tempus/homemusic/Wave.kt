@@ -86,10 +86,11 @@ class WaveOut {
     var pending: Boolean = false
 }
 
-/** `WaveNextIn`. */
-class WaveNextIn(val played: List<PlayEvent>, val queued: List<String>) {
+/** `WaveNextIn`. [held] — the wave's refs the queue still keeps behind the one playing: the Hub must not hand them
+ * out again as new, or a track skipped past comes back as a duplicate. */
+class WaveNextIn(val played: List<PlayEvent>, val queued: List<String>, val held: List<String> = emptyList()) {
     fun compatible(typedFavorites: Boolean, compensationChains: Boolean = typedFavorites, account: String? = null) =
-        WaveNextIn(played.filter { it.supported(typedFavorites, compensationChains) && (it.account == null || it.account == account) }.take(500), queued)
+        WaveNextIn(played.filter { it.supported(typedFavorites, compensationChains) && (it.account == null || it.account == account) }.take(500), queued, held)
 }
 
 /**
@@ -151,12 +152,16 @@ class WaveSession(id: String, val title: String?, val seed: Map<String, Any?>?, 
     }
 
     /** The body of the next call: the events since the last answer and the refs of the wave's tracks [ahead]. */
-    fun request(ahead: List<String>, typedFavorites: Boolean = true, compensationChains: Boolean = typedFavorites): WaveNextIn =
+    fun request(ahead: List<String>, typedFavorites: Boolean = true, compensationChains: Boolean = typedFavorites,
+                held: List<String> = emptyList()): WaveNextIn =
         WaveNextIn(unsent.filter { it.supported(typedFavorites, compensationChains) }.take(MAX_EVENTS),
-            ahead.mapNotNull { refs[it] }.distinct().take(MAX_QUEUED))
+            ahead.mapNotNull { refs[it] }.distinct().take(MAX_QUEUED), heldRefs(held))
 
     /** Capture all events before capability filtering, so held events cannot hide later playback. */
-    fun snapshot(ahead: List<String>) = WaveNextIn(unsent.toList(), ahead.mapNotNull { refs[it] }.distinct().take(MAX_QUEUED))
+    fun snapshot(ahead: List<String>, held: List<String> = emptyList()) =
+        WaveNextIn(unsent.toList(), ahead.mapNotNull { refs[it] }.distinct().take(MAX_QUEUED), heldRefs(held))
+
+    private fun heldRefs(held: List<String>) = held.mapNotNull { refs[it] }.distinct().take(MAX_HELD)
 
     /** The Hub has the events of [request]; a failed call sends them again with the next one. */
     fun sent(request: WaveNextIn) {
@@ -177,6 +182,7 @@ class WaveSession(id: String, val title: String?, val seed: Map<String, Any?>?, 
         private val ASKING = setOf(PlayEvent.START, PlayEvent.LIKE, PlayEvent.DISLIKE)
         private const val MAX_EVENTS = 500
         private const val MAX_QUEUED = 50
+        private const val MAX_HELD = 200
 
         /** Asks again, as the contract wants, when this many wave tracks or fewer are left ahead. */
         const val LOW_WATER = 2
@@ -226,14 +232,12 @@ data class WavePlan(val keep: Int, val remove: List<Int>, val add: List<Int>) {
     }
 
     companion object {
-        /** [ahead], [answer] — refs; [remove] — positions in [ahead], [add] — positions in [answer]. */
-        fun of(ahead: List<String>, answer: List<String>): WavePlan {
-            var keep = 0
-            while (keep < ahead.size && keep < answer.size && ahead[keep] == answer[keep]) keep++
-            // a track the answer repeats further on is not added twice
-            val kept = ahead.take(keep).toSet()
-            val add = answer.indices.drop(keep).filter { answer[it] !in kept }.distinctBy { answer[it] }
-            return WavePlan(keep, (keep until ahead.size).toList(), add)
+        /** [ahead], [answer] — refs; [remove] — positions in [ahead], [add] — positions in [answer].
+         * [held] — refs the queue keeps behind the one playing: they are already in it, so they are never added. */
+        fun of(ahead: List<String>, answer: List<String>, held: Set<String> = emptySet()): WavePlan {
+            val known = ahead.toSet() + held
+            val add = answer.indices.filter { answer[it].isNotBlank() && answer[it] !in known }.distinctBy { answer[it] }
+            return WavePlan(ahead.size, emptyList(), add)
         }
     }
 }

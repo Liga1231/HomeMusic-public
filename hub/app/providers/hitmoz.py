@@ -441,7 +441,12 @@ async def download_audio(
         buf = bytearray()
         f = await asyncio.to_thread(open, part, "wb")
         try:
-            async for chunk in resp.aiter_bytes(64 * 1024):
+            aiter = resp.aiter_bytes(64 * 1024).__aiter__()
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(aiter.__anext__(), timeout=30.0)
+                except StopAsyncIteration:
+                    break
                 buf += chunk
                 size += len(chunk)
                 if len(buf) >= 1024 * 1024:
@@ -461,7 +466,7 @@ async def download_audio(
         if on_progress:
             on_progress(1.0)
         return dest
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, asyncio.TimeoutError) as e:
         raise ProviderError(f"{label}: ошибка при скачивании: {e!r}") from e
     finally:
         if resp is not None:

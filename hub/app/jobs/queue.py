@@ -83,11 +83,18 @@ def notify() -> None:
 
 async def recover_stale() -> int:
     """Called at startup: jobs left `running` by a crashed/stopped process go back to the queue."""
-    async with session_scope() as s:
-        res = await s.execute(
-            update(Job).where(Job.status == "running").values(status="queued", locked_by=None, locked_at=None)
-        )
-        return res.rowcount or 0
+    for attempt in range(5):
+        try:
+            async with session_scope() as s:
+                res = await s.execute(
+                    update(Job).where(Job.status == "running").values(status="queued", locked_by=None, locked_at=None)
+                )
+                return res.rowcount or 0
+        except Exception:
+            if attempt == 4:
+                raise
+            await asyncio.sleep(0.5 * (attempt + 1))
+    return 0
 
 
 def background_slots() -> int:
@@ -121,22 +128,30 @@ async def _claim(worker_id: str) -> Job | None:
 
 
 async def _finish(job_id: int, *, ok: bool, error: str | None = None, retry_in: float | None = None) -> None:
-    async with session_scope() as s:
-        job = await s.get(Job, job_id)
-        if job is None:
+    for attempt in range(5):
+        try:
+            async with session_scope() as s:
+                job = await s.get(Job, job_id)
+                if job is None:
+                    return
+                job.locked_by = None
+                job.locked_at = None
+                if ok:
+                    job.status = "done"
+                    job.last_error = None
+                elif retry_in is not None:
+                    job.status = "queued"
+                    job.run_after = utcnow() + timedelta(seconds=retry_in)
+                    job.last_error = error
+                else:
+                    job.status = "failed"
+                    job.last_error = error
             return
-        job.locked_by = None
-        job.locked_at = None
-        if ok:
-            job.status = "done"
-            job.last_error = None
-        elif retry_in is not None:
-            job.status = "queued"
-            job.run_after = utcnow() + timedelta(seconds=retry_in)
-            job.last_error = error
-        else:
-            job.status = "failed"
-            job.last_error = error
+        except Exception as e:
+            if attempt == 4:
+                log.exception("failed to finish job %s: %r", job_id, e)
+                raise
+            await asyncio.sleep(0.5 * (attempt + 1))
 
 
 async def _next_wakeup_in() -> float:
@@ -157,7 +172,10 @@ async def run_job(job: Job) -> None:
         return
     token = _priority.set(Priority(background=True)) if (job.priority or 0) < 0 else None
     try:
-        await fn(job)
+        timeout_s = 300.0 if job.kind == "download_item" else 600.0
+        await asyncio.wait_for(fn(job), timeout=timeout_s)
+    except TimeoutError:
+        raise TimeoutError(f"job {job.id} ({job.kind}) exceeded {timeout_s}s timeout")
     except RetryLater as e:
         await _finish(job.id, ok=False, error=str(e), retry_in=e.delay_s)
     except PermanentError as e:
@@ -220,6 +238,19 @@ class WorkerPool:
                 await asyncio.sleep(2)
                 continue
             if job is None:
+                try:
+                    async with session_scope() as s:
+                        stale_cutoff = utcnow() - timedelta(minutes=10)
+                        res = await s.execute(
+                            update(Job)
+                            .where(Job.status == "running", Job.locked_at < stale_cutoff)
+                            .values(status="queued", locked_by=None, locked_at=None)
+                        )
+                        if res.rowcount:
+                            log.warning("watchdog recovered %s stale running jobs", res.rowcount)
+                            _wakeup.set()
+                except Exception:
+                    pass
                 _wakeup.clear()
                 try:
                     await asyncio.wait_for(_wakeup.wait(), timeout=await _next_wakeup_in())
@@ -228,7 +259,11 @@ class WorkerPool:
                 continue
             # let other idle workers look for more work too
             _wakeup.set()
-            await run_job(job)
+            try:
+                await run_job(job)
+            except Exception:
+                log.exception("unhandled error in run_job for job %s", getattr(job, "id", None))
+                await asyncio.sleep(1)
 
     def start(self) -> None:
         self._tasks = [asyncio.create_task(self._worker(i), name=f"job-worker-{i}") for i in range(self.n)]

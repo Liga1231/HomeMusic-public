@@ -20,7 +20,10 @@ def _set_pragmas(dbapi_conn, _record) -> None:
     cur.execute("PRAGMA journal_mode=WAL")
     cur.execute("PRAGMA synchronous=NORMAL")
     cur.execute("PRAGMA foreign_keys=ON")
-    cur.execute("PRAGMA busy_timeout=10000")
+    cur.execute("PRAGMA busy_timeout=60000")
+    cur.execute("PRAGMA cache_size=-64000")
+    cur.execute("PRAGMA temp_store=MEMORY")
+    cur.execute("PRAGMA mmap_size=268435456")
     cur.close()
 
 
@@ -28,7 +31,7 @@ def init_engine(db_path: Path | None = None) -> AsyncEngine:
     global _engine, _sessionmaker
     path = db_path or get_settings().db_path
     path.parent.mkdir(parents=True, exist_ok=True)
-    _engine = create_async_engine(f"sqlite+aiosqlite:///{path.as_posix()}", connect_args={"timeout": 30})
+    _engine = create_async_engine(f"sqlite+aiosqlite:///{path.as_posix()}", connect_args={"timeout": 60})
     event.listen(_engine.sync_engine, "connect", _set_pragmas)
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
     return _engine

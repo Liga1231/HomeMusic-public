@@ -7,7 +7,7 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/models/hf HF_HUB_DISABLE_TELEMETRY=1 \
     UV_NO_CACHE=1 UV_CONCURRENT_INSTALLS=2 UV_CONCURRENT_DOWNLOADS=4
 # ~7 GB of CUDA wheels: no uv cache in the layer and few parallel unpacks — the build ran the WSL VM out of memory
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+RUN sed -i "s/deb.debian.org/mirror.yandex.ru/g" /etc/apt/sources.list.d/debian.sources 2>/dev/null; sed -i "s/deb.debian.org/mirror.yandex.ru/g" /etc/apt/sources.list 2>/dev/null; apt-get -o Acquire::ForceIPv4=true update && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:0.10.8 /uv /usr/local/bin/uv
 WORKDIR /app

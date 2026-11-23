@@ -31,13 +31,20 @@ PARALLEL = 4
 
 def library_track(t) -> CatalogTrack:
     """A library song as a catalog-like track: its Deezer record when it has one, else `nd:<song>`."""
+    from urllib.parse import quote
+    c_url = f"/api/nd/cover/{quote(t.nd_song_id, safe='')}?size=1000" if getattr(t, 'nd_song_id', None) else (
+        f"/api/library/albums/{t.album_id}/cover" if getattr(t, 'album_id', None) else None
+    )
+    c_small = f"/api/nd/cover/{quote(t.nd_song_id, safe='')}?size=300" if getattr(t, 'nd_song_id', None) else (
+        f"/api/library/albums/{t.album_id}/cover?size=300" if getattr(t, 'album_id', None) else None
+    )
     if t.deezer_track_id:
         return CatalogTrack(ref=f"dz:{t.deezer_track_id}", source="dz", id=str(t.deezer_track_id), title=t.title,
                             artist=t.artist, artists=[t.artist], album_title=t.album, duration_s=t.duration_s,
-                            isrc=t.isrc, explicit=t.explicit)
+                            isrc=t.isrc, explicit=t.explicit, cover_url=c_url, cover_small_url=c_small)
     return CatalogTrack(ref=f"nd:{t.nd_song_id}", source="nd", id=str(t.nd_song_id), title=t.title, artist=t.artist,
                         artists=[t.artist], album_title=t.album, duration_s=t.duration_s, isrc=t.isrc,
-                        explicit=t.explicit)
+                        explicit=t.explicit, cover_url=c_url, cover_small_url=c_small)
 
 
 def external_id(hit: Hit) -> str:

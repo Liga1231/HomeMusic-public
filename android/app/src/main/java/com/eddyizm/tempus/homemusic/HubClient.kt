@@ -556,7 +556,8 @@ object HubClient {
     @WorkerThread
     @Throws(IOException::class)
     fun waveNext(sessionId: String, body: WaveNextIn): WaveOut {
-        val json = gson.toJson(mapOf("played" to eventPayload(body.played, supportsLaunchEvents()), "queued" to body.queued)).toRequestBody(JSON)
+        val json = gson.toJson(mapOf("played" to eventPayload(body.played, supportsLaunchEvents()),
+            "queued" to body.queued, "held" to body.held)).toRequestBody(JSON)
         return call({ Request.Builder().url("$it/api/wave/$sessionId/next").post(json).build() }) { parse(it, WaveOut::class.java) }
     }
 

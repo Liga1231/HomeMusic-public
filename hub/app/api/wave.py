@@ -60,7 +60,7 @@ async def next_(session_id: str, body: WaveNextIn, user: User = Depends(current_
                 s: AsyncSession = Depends(get_session, scope="function")):
     """The events since the last call; the next 5 tracks, picked again with them (they replace `queued`)."""
     try:
-        b = await wave.next_batch(user, session_id, body.played, body.queued)
+        b = await wave.next_batch(user, session_id, body.played, body.queued, body.held)
     except wave.WaveError as e:
         raise HTTPException(e.status, str(e)) from e
     return await wave_out(s, b, user.id)

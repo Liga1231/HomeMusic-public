@@ -16,9 +16,9 @@ const FLAG = 'hm-wave-audio';
 export function loudnessEnabled(): boolean {
   if (!isDesktop() || typeof AudioContext === 'undefined') return false;
   try {
-    if (localStorage.getItem(FLAG) === '0') return false;
-  } catch { /* storage unavailable: the default below */ }
-  return true;
+    if (localStorage.getItem(FLAG) === '1') return true;
+  } catch { /* storage unavailable */ }
+  return false;
 }
 
 let ctx: AudioContext | null = null;

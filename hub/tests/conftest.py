@@ -64,8 +64,10 @@ def hub_env(db_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> I
 
 def _clear_caches() -> None:
     from app import accounts, auth, config, google_auth, security
+    from app.api.medialib import invalidate_liked_cache
     from app.library.navidrome import NavidromeAdmin, NavidromeHistory
     from app.mixes import sources, wave
+    from app.mixes.taste import invalidate_profile_cache
     from app.providers import ytdlp
 
     config.get_settings.cache_clear()
@@ -78,4 +80,6 @@ def _clear_caches() -> None:
     ytdlp._media_hosts.clear()
     sources._lastfm_limiter = None
     wave._rt.clear()
+    invalidate_liked_cache()
+    invalidate_profile_cache()
 

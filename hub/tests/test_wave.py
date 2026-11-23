@@ -496,7 +496,7 @@ async def test_a_session_outlives_a_restart_but_not_another_user(env, monkeypatc
 
 async def test_an_idle_session_is_over(env, monkeypatch) -> None:
     from app.db import session_scope
-    from app.models import WaveSession
+    from app.models import User, WaveSession
 
     c = env["client"]
     await history(env["admin"])
@@ -537,7 +537,7 @@ async def test_settle_clears_finished_tasks_before_their_callbacks_run(monkeypat
 async def test_v2_wave_refreshes_profile_pins_model_and_does_not_relearn_after_restart(env, monkeypatch):
     from app.config import get_settings
     from app.db import session_scope
-    from app.models import WaveSession
+    from app.models import User, WaveSession
 
     cfg = get_settings().cfg.mixes
     monkeypatch.setattr(cfg, "taste_model", "v2")
@@ -594,7 +594,7 @@ async def test_event_id_cannot_be_moved_between_wave_sessions(env, monkeypatch):
 
 async def test_legacy_state_bootstraps_seen_journal_without_replaying_old_skip(env, monkeypatch):
     from app.db import session_scope
-    from app.models import WaveSession
+    from app.models import User, WaveSession
 
     c = env["client"]
     await history(env["admin"])
@@ -619,7 +619,7 @@ async def test_legacy_state_bootstraps_seen_journal_without_replaying_old_skip(e
 
 async def wave_row(sid: str):
     from app.db import session_scope
-    from app.models import WaveSession
+    from app.models import User, WaveSession
 
     async with session_scope() as s:
         return await s.get(WaveSession, sid)
@@ -662,7 +662,7 @@ async def test_a_bad_origin_is_refused(env, origin: str) -> None:
 
 async def test_an_old_session_is_cleared_to_a_summary_not_deleted(env, monkeypatch) -> None:
     from app.db import session_scope
-    from app.models import WaveSession
+    from app.models import User, WaveSession
 
     c = env["client"]
     await history(env["admin"])
@@ -752,3 +752,29 @@ async def test_launch_fields_of_the_wave_events_are_stored(env, monkeypatch) -> 
     async with session_scope() as s:
         row = (await s.execute(select(PlayEvent).where(PlayEvent.event_id == e["event_id"]))).scalar_one()
     assert (row.context, row.launch_id, row.launch_origin) == (f"wave:{sid}", f"wave:{sid}", "wave")
+
+
+async def test_a_track_skipped_past_is_not_handed_out_again(env, monkeypatch) -> None:
+    """The queue keeps tracks behind the one playing: a fast skip or a jump to the last track must not bring them
+    back as new picks (they would be appended and played a second time)."""
+    c = env["client"]
+    await history(env["admin"])
+    fake_sources(monkeypatch, [tr(5000 + i) for i in range(30)])
+    w = (await c.post("/api/wave/start", json={})).json()
+    sid, refs = w["session_id"], [t["ref"] for t in w["tracks"]]
+
+    # a fast skip: only the last track is still ahead, the middle ones are behind the one playing
+    r = await c.post(f"/api/wave/{sid}/next", json={
+        "played": [ev("start", refs[0]), ev("start", refs[1])],
+        "queued": refs[4:], "held": refs[2:4]})
+    assert r.status_code == 200, r.text
+    got = [t["ref"] for t in r.json()["tracks"]]
+    assert got[:1] == refs[4:]
+    assert not set(got) & set(refs[2:4]), got
+
+    # a jump to the last track: nothing ahead at all, the whole block behind is still in the queue
+    r = await c.post(f"/api/wave/{sid}/next", json={
+        "played": [ev("start", refs[4])], "queued": [], "held": refs[:4]})
+    assert r.status_code == 200, r.text
+    got = [t["ref"] for t in r.json()["tracks"]]
+    assert got and not set(got) & set(refs[:4]), got

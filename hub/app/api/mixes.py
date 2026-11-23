@@ -44,7 +44,11 @@ async def mix_out(s: AsyncSession, mix: Mix, user_id: int) -> MixOut:
         d = base.model_dump() if base is not None else {**t.model_dump(), "owned": bool(i.nd_song_id),
                                                         "library_track_id": i.track_id}
         if i.nd_song_id:
-            d.update(owned=True, nd_song_id=i.nd_song_id, library_track_id=i.track_id or d.get("library_track_id"))
+            from urllib.parse import quote
+            c_url = d.get("cover_url") or f"/api/nd/cover/{quote(i.nd_song_id, safe='')}?size=1000"
+            c_small = d.get("cover_small_url") or f"/api/nd/cover/{quote(i.nd_song_id, safe='')}?size=300"
+            d.update(owned=True, nd_song_id=i.nd_song_id, library_track_id=i.track_id or d.get("library_track_id"),
+                     cover_url=c_url, cover_small_url=c_small)
         f = i.features_json or {}
         out.append(MixTrackOut(**d, position=i.position, generator=i.generator,
                                generator_title=GENERATOR_TITLES.get(i.generator, i.generator),

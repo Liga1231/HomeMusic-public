@@ -1050,6 +1050,8 @@ export interface WaveNextIn {
   played: PlayEventIn[];
   /** refs of the wave's tracks still ahead in the player, not started: the answer replaces them */
   queued: string[];
+  /** refs the queue keeps behind the one playing (skipped past, not dropped): never handed out again */
+  held?: string[];
 }
 
 export interface WaveTrackOut extends TrackOut {

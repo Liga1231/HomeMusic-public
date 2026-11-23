@@ -982,6 +982,8 @@ class WaveNextIn(BaseModel):
     played: list[Any] = Field(default_factory=list, max_length=500)
     # refs (as `tracks[].ref`) of the wave's tracks the client still has ahead, not started: the answer replaces them
     queued: list[str] = Field(default_factory=list, max_length=50)
+    # refs the client's queue still keeps behind the one playing (skipped past, not dropped): never handed out again
+    held: list[str] = Field(default_factory=list, max_length=200)
 
 
 class WaveTrackOut(TrackOut):

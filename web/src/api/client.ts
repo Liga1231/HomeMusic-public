@@ -357,13 +357,13 @@ export const api = {
   deletePlaylist: (id: string) => request<OkOut>('DELETE', `/api/playlists/${enc(id)}`),
 
   // the Navidrome library (a browser shows it; the app has it natively)
-  ndHome: (signal?: AbortSignal) => request<NdHomeOut>('GET', '/api/nd/home', { signal }),
-  ndLiked: (signal?: AbortSignal) => request<NdLikedOut>('GET', '/api/nd/liked', { signal }),
+  ndHome: (signal?: AbortSignal, fresh = false) => cachedGet<NdHomeOut>('/api/nd/home', signal, fresh),
+  ndLiked: (signal?: AbortSignal, fresh = false) => cachedGet<NdLikedOut>('/api/nd/liked', signal, fresh),
   ndArtists: (signal?: AbortSignal) => cachedGet<NdArtistOut[]>('/api/nd/artists', signal),
-  ndArtist: (id: string, signal?: AbortSignal) => request<NdArtistPageOut>('GET', `/api/nd/artists/${enc(id)}`, { signal }),
-  ndAlbum: (id: string, signal?: AbortSignal) => request<NdAlbumOut>('GET', `/api/nd/albums/${enc(id)}`, { signal }),
-  ndAlbums: (type: NdAlbumList, offset = 0, size = 50, signal?: AbortSignal) =>
-    request<NdAlbumOut[]>('GET', withQuery('/api/nd/albums', { type, offset, size }), { signal }),
+  ndArtist: (id: string, signal?: AbortSignal, fresh = false) => cachedGet<NdArtistPageOut>(`/api/nd/artists/${enc(id)}`, signal, fresh),
+  ndAlbum: (id: string, signal?: AbortSignal, fresh = false) => cachedGet<NdAlbumOut>(`/api/nd/albums/${enc(id)}`, signal, fresh),
+  ndAlbums: (type: NdAlbumList, offset = 0, size = 50, signal?: AbortSignal, fresh = false) =>
+    cachedGet<NdAlbumOut[]>(withQuery('/api/nd/albums', { type, offset, size }), signal, fresh),
 
   // imports from music services
   imports: (signal?: AbortSignal) => request<ImportOut[]>('GET', '/api/imports', { signal }),

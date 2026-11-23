@@ -109,7 +109,7 @@ class YoutubeAccess:
                  clock: Callable[[], float] = time.monotonic) -> None:
         self.sem = PrioritySemaphore(max_parallel or cfg.max_parallel)
         self.clock = clock
-        self.cooldown_s = cfg.refusal_cooldown_s
+        self.cooldown_s = min(60.0, cfg.refusal_cooldown_s)
         self._revision = _cookie_revision()
         self._blocked_until = 0.0
         self._message = ""
@@ -224,8 +224,6 @@ class _YdlLogger:
         log.debug("%s", msg)
 
     def warning(self, msg: str) -> None:
-        if self.youtube and (message := _refusal_message(msg)):
-            raise _YoutubeRefusal(message)
         log.warning("yt-dlp: %s", msg)
 
     def error(self, msg: str) -> None:
@@ -482,7 +480,7 @@ class YtdlpProvider:
         }
         if self._youtube:
             opts.update({
-                "extractor_args": {"youtube": {"player_client": ["mweb"]}},
+                "extractor_args": {"youtube": {"player_client": [c.strip() for c in os.environ.get("YTDLP_PLAYER_CLIENT", "android").split(",") if c.strip()]}},
                 "retries": 1,
                 "fragment_retries": 1,
                 "extractor_retries": 1,

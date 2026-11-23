@@ -1,5 +1,5 @@
 import { useEffect, useSyncExternalStore } from 'react';
-import { api } from '../api/client';
+import { api, invalidateCache } from '../api/client';
 import type { FavoriteSubject, FavoriteTarget, FavoriteType } from '../api/types';
 import { typedFavoritesSupported } from './capabilities';
 import { hubEvents } from './events';
@@ -153,6 +153,8 @@ export async function toggleLike(t: LikeTarget): Promise<void> {
     }
     retries.delete(key);
     if (!liked && t.ref) pendingRefs.delete(t.ref);
+    invalidateCache('/api/nd/liked');
+    invalidateCache('/api/nd/home');
     window.dispatchEvent(new CustomEvent('hm:hub-favorite', { detail: { ref: t.ref, star: liked } }));
     toast(liked ? 'Добавлено в понравившиеся' : 'Убрано из понравившихся', 'success');
   } catch (e) {

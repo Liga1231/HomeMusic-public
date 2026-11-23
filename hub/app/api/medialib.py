@@ -24,6 +24,22 @@ from app.models import CatalogCache, ImportItem, Track, User
 
 router = APIRouter(prefix="/api/nd", tags=["medialib"])
 
+import time
+
+_liked_cache: dict[int, tuple[float, NdLikedOut, bytes]] = {}
+
+def invalidate_liked_cache(user_id: int | None = None) -> None:
+    if user_id is None:
+        _liked_cache.clear()
+    else:
+        _liked_cache.pop(user_id, None)
+    try:
+        from app.mixes.taste import invalidate_taste_cache
+        invalidate_taste_cache(user_id)
+    except Exception:
+        pass
+
+
 ALBUM_LISTS = ("recent", "frequent", "newest", "starred", "alphabeticalByName", "alphabeticalByArtist", "random")
 HOME_ROW = 15
 HOME_RADIO = 30
@@ -149,6 +165,10 @@ async def artist(artist_id: str, user: User = Depends(current_user)):
 
 @router.get("/liked", response_model=NdLikedOut)
 async def liked(user: User = Depends(current_user), s: AsyncSession = Depends(get_session, scope="function")):
+    now = time.time()
+    hit = _liked_cache.get(user.id)
+    if hit is not None and (now - hit[0] < 3600.0) and len(hit[1].songs) > 0:
+        return Response(content=hit[2], media_type="application/json")
     from app.favorites import parse_time, snapshot
     from app.imports.apply import _user_likes
 
@@ -212,10 +232,14 @@ async def liked(user: User = Depends(current_user), s: AsyncSession = Depends(ge
         return st is None or st.liked
 
     ranked.sort(key=lambda pair: pair[0] or datetime.min, reverse=True)
-    return NdLikedOut(songs=[song for _, song in ranked],
-                      albums=[album_out(a) for a in sorted(body.get("album") or [], key=lambda x: x.get("starred") or "", reverse=True)
-                              if visible("album", a)],
-                      artists=[artist_out(a) for a in body.get("artist") or [] if visible("artist", a)])
+    res_liked = NdLikedOut(songs=[song for _, song in ranked],
+                          albums=[album_out(a) for a in sorted(body.get("album") or [], key=lambda x: x.get("starred") or "", reverse=True)
+                                  if visible("album", a)],
+                          artists=[artist_out(a) for a in body.get("artist") or [] if visible("artist", a)])
+    json_bytes = res_liked.model_dump_json().encode("utf-8")
+    if len(res_liked.songs) > 0:
+        _liked_cache[user.id] = (time.time(), res_liked, json_bytes)
+    return Response(content=json_bytes, media_type="application/json")
 
 
 @router.get("/cover/{cover_id}")

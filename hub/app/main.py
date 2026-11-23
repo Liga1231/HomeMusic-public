@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from app import db
 from app.config import get_settings
@@ -27,6 +28,24 @@ def _import_handlers() -> None:
         import app.ai.pipeline  # noqa: F401
     except ImportError:
         log.warning("assistant pipeline not available")
+
+
+async def _prewarm_cache():
+    try:
+        await asyncio.sleep(2.0)
+        from app.db import session_scope
+        from app.models import User
+        from app.mixes.taste import build_profile
+        from app.api.medialib import liked
+        async with session_scope() as s:
+            user = await s.get(User, 1)
+            if user:
+                log.info("Pre-warming taste profile and liked cache for %s...", user.nd_username)
+                await build_profile(s, user, model="v2")
+                await liked(user=user, s=s)
+                log.info("Pre-warming complete!")
+    except Exception:
+        log.exception("Pre-warming failed")
 
 
 @asynccontextmanager
@@ -60,6 +79,7 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(scrobbles_loop(), name="scrobbles"))
         tasks.append(asyncio.create_task(schedule_loop(), name="mixes"))
         tasks.append(asyncio.create_task(playlist_adds_loop(), name="playlist-adds"))
+        tasks.append(asyncio.create_task(_prewarm_cache(), name="prewarm-cache"))
     log.info("hub started")
     try:
         yield
@@ -98,6 +118,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="HomeMusic Hub", version="0.1.0", lifespan=lifespan, docs_url="/api/docs",
                   openapi_url="/api/openapi.json", redoc_url=None)
+    app.add_middleware(GZipMiddleware, minimum_size=1000)
     for r in (auth.router, search.router, catalog.router, downloads.router, listen.router, library.router, medialib.router,
               uploads.router, playlists.router, plays.router, mixes.router, wave.router, smart_shuffle.router, imports.router, events.router, system.router, admin.router,
               insights.router):

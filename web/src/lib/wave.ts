@@ -184,12 +184,20 @@ async function ask() {
   persistWave();
   const st = getListenState();
   const queued = st.queue.slice(st.index + 1).map((t) => t.ref);
+  const held = st.queue.slice(0, st.index).map((t) => t.ref);
   try {
-    const w = await api.waveNext(s.id, { played, queued });
+    const w = await api.waveNext(s.id, { played, queued, held });
     if (session !== s || getListenState().context !== s.context) return;
     remember(s, w);
-    if (w.tracks.length) replaceUpcoming(w.tracks.map(listenTrack));
-    else if (w.pending) setTimeout(() => void ask(), RETRY_MS);
+    if (w.tracks.length) {
+      const currentSt = getListenState();
+      const currentUpcoming = currentSt.queue.slice(currentSt.index + 1);
+      const inQueue = new Set(currentSt.queue.map((t) => t.ref));
+      const newTracks = w.tracks.map(listenTrack).filter((t) => !inQueue.has(t.ref));
+      if (newTracks.length > 0) {
+        replaceUpcoming([...currentUpcoming, ...newTracks]);
+      }
+    } else if (w.pending) setTimeout(() => void ask(), RETRY_MS);
   } catch (e) {
     if (e instanceof ApiError && e.status === 404) {
       end(); // the session is over (a day without it): the queue plays out

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { api } from '../api/client';
+import { api, invalidateCache } from '../api/client';
 import type { NdAlbumOut, NdArtistOut, NdSongOut } from '../api/types';
 import { playAll, TrackRow } from '../components/catalog';
 import { Icon } from '../components/Icon';
@@ -152,7 +152,7 @@ export function LikedPage() {
 
   return (
     <div>
-      <PageHeader title="Понравившиеся" back="/library" sub={res.data ? tracksWord(songs.length) : undefined} right={<IconButton icon="refresh" label="Обновить" onClick={() => res.reload(true)} />} />
+      <PageHeader title="Понравившиеся" back="/library" sub={res.data ? tracksWord(songs.length) : undefined} right={<IconButton icon="refresh" label="Обновить" onClick={() => { invalidateCache('/api/nd/liked'); res.reload(true); }} />} />
       {res.loading ? (
         <SkeletonRows />
       ) : res.error ? (

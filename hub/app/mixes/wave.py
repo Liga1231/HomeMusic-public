@@ -10,7 +10,8 @@ after every action.
   lowers the artist and what sounds like the track (the embedder's vectors); a ♥ or a track played to its end adds
   its YouTube Music radio to the pool (`session_radio`) and raises what sounds like it. An artist plays at most once
   in 8 tracks; the mode keeps the familiar share of a mix.
-- The tracks the client still has ahead (`queued`) are picked again with the rest: the answer replaces them.
+- The tracks the client still has ahead (`queued`) keep their order at the head of the answer; new ones are picked
+  only up to `BATCH` ahead, so a skip never reshuffles what is already queued.
 - Sources answer at their own pace: a request waits for them `wave_wait_s`, what comes later joins the pool in the
   background (one lock per session). A pool running low is refilled from the radios of the next seeds.
 - Tracks play as a stream from the Hub (their files are prefetched); one played to its end is downloaded quietly,
@@ -35,6 +36,7 @@ from typing import Any
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.catalog.models import CatalogTrack, split_ref
@@ -45,7 +47,7 @@ from app.library.owned import ACTIVE_STATUSES
 from app.matching.normalize import fingerprint
 from app.mixes import build, embedder, sources
 from app.mixes.resolve import catalog_track, library_track
-from app.mixes.taste import EARLY_SKIP_S, Profile, TasteTrack, artist_key, build_profile, skip_weight
+from app.mixes.taste import EARLY_SKIP_S, Profile, TasteTrack, artist_key, build_profile, profile_epoch, skip_weight
 from app.mixes.taste_math import V2Profile, saturation
 from app.mixes.taste_snapshot import TasteEvent
 from app.models import DownloadBatch, DownloadItem, PlayEvent, Track, User, WaveItem, WaveSession, utcnow
@@ -178,10 +180,12 @@ class Runtime:
     mode: str
     state: State
     profile: Profile | None = None
+    profile_epoch: int = -1  # the taste decisions this profile was built from (`taste.profile_epoch`)
     vectors: dict[str, list[float]] = field(default_factory=dict)
     asked: dict[str, float] = field(default_factory=dict)  # key -> when it was asked (monotonic)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     tasks: set[asyncio.Task] = field(default_factory=set)
+    embed_task: asyncio.Task | None = None  # the one preview-embedding batch in flight (not a source: never `pending`)
     refilling: bool = False
     # a session of another kind (the smart shuffle, app.mixes.smart) keeps its state in its own row, and a track
     # played to its end is not downloaded for it
@@ -193,11 +197,26 @@ class Runtime:
 _rt: dict[str, Runtime] = {}
 
 
+async def _retry_write(what: str, fn: Callable[[], Awaitable[Any]]) -> Any:
+    """SQLite hands out one writer at a time: a busy moment must cost a short wait, not the user's wave."""
+    for attempt in range(4):
+        try:
+            return await fn()
+        except OperationalError as e:
+            if attempt == 3 or "locked" not in str(e).lower():
+                raise
+            log.info("wave: %s waited for the database (%s)", what, attempt + 1)
+            await asyncio.sleep(0.3 * (attempt + 1))
+
+
 async def _save(sid: str, rt: Runtime) -> None:
-    async with session_scope() as s:
-        row = await s.get(WaveSession, sid)
-        if row is not None:
-            row.state_json, row.updated_at = rt.state.dump(), utcnow()
+    async def write() -> None:
+        async with session_scope() as s:
+            row = await s.get(WaveSession, sid)
+            if row is not None:
+                row.state_json, row.updated_at = rt.state.dump(), utcnow()
+
+    await _retry_write(f"state of {sid}", write)
 
 
 async def _runtime(sid: str, user: User) -> Runtime:
@@ -221,8 +240,14 @@ async def _runtime(sid: str, user: User) -> Runtime:
 
 
 async def _profile(rt: Runtime, user: User) -> Profile:
+    """The session's profile, rebuilt only when the user's taste decisions changed since it was built: a skip
+    recomputes nothing, a ♥ or «Не нравится» made anywhere takes effect on the next call."""
+    epoch = profile_epoch(user.id)
+    if rt.profile is not None and rt.profile_epoch == epoch:
+        return rt.profile
     async with session_scope() as s:
         rt.profile = await build_profile(s, user, model=rt.state.taste_model)
+    rt.profile_epoch = epoch
     if isinstance(rt.profile, V2Profile):
         from app.mixes.taste_select import prepare
         await prepare(rt.profile)
@@ -277,7 +302,16 @@ def generators(p: Profile, seed: CatalogTrack | None, seed_artist: dict[str, Any
         if songs:
             out[ARTIST_SONGS] = own
         return {**out, "ytm_radio": radios}
-    return build.generators(p, seeds)
+    gens = build.generators(p, seeds)
+    async def _sample_gen(fn: build.Gen, limit: int) -> list[CatalogTrack]:
+        return (await fn())[:limit]
+    if "favorites" in gens:
+        fav_fn = gens["favorites"]
+        gens["favorites"] = lambda: _sample_gen(fav_fn, 40)
+    if "stash" in gens:
+        stash_fn = gens["stash"]
+        gens["stash"] = lambda: _sample_gen(stash_fn, 30)
+    return gens
 
 
 def refill_generators(p: Profile, st: State) -> dict[str, build.Gen]:
@@ -359,14 +393,16 @@ async def _sound(p: Profile, cands: list[build.Cand]) -> None:
         log.info("wave: embedder unavailable: %s", e)
 
 
-async def _gather(sid: str, rt: Runtime, gens: list[tuple[str, build.Gen]], enough: Callable[[], bool]) -> None:
+async def _gather(sid: str, rt: Runtime, gens: list[tuple[str, build.Gen]], enough: Callable[[], bool],
+                  wait_s: float | None = None) -> None:
     """Runs the generators (a name may repeat: the session's radios); waits for them `wave_wait_s` (or until
     `enough`), absorbing each as it answers. Those still running then join the pool in the background. The caller
     holds the session's lock."""
     if not gens:
         return
     tasks = {asyncio.create_task(build.run_generators({n: f})) for n, f in gens}
-    deadline = time.monotonic() + get_settings().wave_wait_s
+    timeout = wait_s if wait_s is not None else get_settings().wave_wait_s
+    deadline = time.monotonic() + timeout
     pending = tasks
     while pending:
         done, pending = await asyncio.wait(pending, timeout=max(0.0, deadline - time.monotonic()),
@@ -517,8 +553,8 @@ async def _learn_v2(sid: str, rt: Runtime, events: list[PlayEvent]) -> None:
     for e in events:
         if e.user_id != rt.user_id or not e.event_id or e.event_id in st.seen:
             continue
-        # Future/delayed events remain unconsumed until their occurrence time arrives.
-        if e.ts > utcnow() or (e.client or "").lower().endswith("-debug"):
+        # Future/delayed events remain unconsumed until their occurrence time arrives (with 5m tolerance for client clock skew).
+        if e.ts > utcnow() + timedelta(minutes=5) or (e.client or "").lower().endswith("-debug"):
             continue
         st.seen.add(e.event_id)
         if (e.target_type or "track") != "track":
@@ -573,14 +609,54 @@ def value(c: build.Cand, st: State, vectors: dict[str, list[float]], pos: list[f
 
 def pick(st: State, p: Profile, mode: str, vectors: dict[str, list[float]], n: int = BATCH,
          queued: set[str] = frozenset(), first: build.Cand | None = None,
-         values: dict[str, float] | None = None) -> list[build.Cand]:
+         values: dict[str, float] | None = None,
+         exclude_fps: set[str] | None = None, exclude_refs: set[str] | None = None) -> list[build.Cand]:
     """The next `n`: the best by `value` keeping the mode's familiar share, an artist at most once in `ARTIST_GAP`
     tracks (counting the played ones; the artist of a wave by an artist — once in `SEED_ARTIST_GAP`); with nothing else left, the gap gives way (never the same artist twice in a
     row). «Не нравится» set since the candidate came in drops it. `queued` — refs the client has ahead already.
     `values` gets the `value` of every candidate ranked, by ref (the analytics of `wave_items`)."""
     pos = _weighted_center(st.positive_weights, vectors) if st.taste_model == "v2" else _center(st.pos, vectors)
     neg = None if st.taste_model == "v2" else _center(st.neg, vectors)
-    pool = [c for c in [*st.out.values(), *st.pool.values()] if c is not first and not _disliked(c, p)]
+
+    played_refs = {x.ref for x in st.played} | (exclude_refs or set())
+    played_nds = {x.nd_song_id for x in st.played if x.nd_song_id}
+    played_fps = {fingerprint((x.track or {}).get("artist") or x.artist, (x.track or {}).get("title", ""))
+                  for x in st.played if x.track}
+    heard = set(st.heard) | played_fps | (exclude_fps or set())
+
+    # Pool must exclude tracks already heard/played in this session, and disliked tracks
+    seen_fp: set[str] = set()
+    deduped_pool = []
+    for c in [*st.out.values(), *st.pool.values()]:
+        if c is first or _disliked(c, p):
+            continue
+        fp = fp_of(c)
+        if fp in heard or c.track.ref in played_refs:
+            continue
+        if c.nd_song_id and c.nd_song_id in played_nds:
+            continue
+        if fp in seen_fp:
+            continue
+        seen_fp.add(fp)
+        deduped_pool.append(c)
+
+    pool = deduped_pool
+    if len(pool) < n:
+        pool = []
+        seen_fp.clear()
+        for c in [*st.out.values(), *st.pool.values()]:
+            if c is first or _disliked(c, p):
+                continue
+            fp = fp_of(c)
+            if fp in played_fps or c.track.ref in played_refs:
+                continue
+            if c.nd_song_id and c.nd_song_id in played_nds:
+                continue
+            if fp in seen_fp:
+                continue
+            seen_fp.add(fp)
+            pool.append(c)
+
     vals = {id(c): value(c, st, vectors, pos, neg, c.track.ref in queued) for c in pool}
     if values is not None:
         values.update((c.track.ref, vals[id(c)]) for c in pool)
@@ -588,18 +664,36 @@ def pick(st: State, p: Profile, mode: str, vectors: dict[str, list[float]], n: i
     share = build.MODES.get(mode, build.MODES["normal"])
     out: list[build.Cand] = [first] if first is not None else []
     recent = [x.artist for x in st.played]
+    out_fps = {fp_of(x) for x in out}
+    out_refs = {x.track.ref for x in out}
+    out_nds = {x.nd_song_id for x in out if x.nd_song_id}
+
     while len(out) < n and ranked:
         seq = recent + [c.artist for c in out]
         gap = set(seq[-(ARTIST_GAP - 1):])
         seed_gap = set(seq[-(SEED_ARTIST_GAP - 1):])
         total, fam = st.started + len(out), st.started_familiar + sum(c.familiar for c in out)
         want_fam = fam + 1 <= share * (total + 1) + 0.5
-        ok = [c for c in ranked if c.artist not in (seed_gap if c.artist == st.seed_artist else gap)]
+
+        # Eligible candidates: no duplicates with tracks already in out
+        eligible = [c for c in ranked if fp_of(c) not in out_fps and c.track.ref not in out_refs
+                    and (not c.nd_song_id or c.nd_song_id not in out_nds)]
+        if not eligible:
+            break
+
+        ok = [c for c in eligible if c.artist not in (seed_gap if c.artist == st.seed_artist else gap)]
         best = (next((c for c in ok if c.familiar == want_fam), None) or (ok[0] if ok else None)
-                or next((c for c in ranked if not seq or c.artist != seq[-1]), None))
+                or next((c for c in eligible if not seq or c.artist != seq[-1]), None)
+                or (eligible[0] if eligible else None))
         if best is None:
             break
-        ranked.remove(best)
+        best_fp = fp_of(best)
+        out_fps.add(best_fp)
+        out_refs.add(best.track.ref)
+        if best.nd_song_id:
+            out_nds.add(best.nd_song_id)
+        ranked = [c for c in ranked if fp_of(c) != best_fp and c.track.ref != best.track.ref
+                  and (not best.nd_song_id or c.nd_song_id != best.nd_song_id)]
         out.append(best)
     return out
 
@@ -608,6 +702,17 @@ def _disliked(c: build.Cand, p: Profile) -> bool:
     t = c.track
     return p.disliked(ref=t.ref if t.source in ("dz", "file") else None, nd_song_id=c.nd_song_id, artist=t.artist,
                       artist_ref=t.artist_ref)
+
+
+async def _embed_previews_bg(todo: list[build.Cand]) -> None:
+    try:
+        urls = await asyncio.gather(*(build._preview(c.track) for c in todo), return_exceptions=True)
+        items = [{"key": c.key, "url": url} for c, url in zip(todo, urls) if isinstance(url, str) and url]
+        if items:
+            async with embedder.EmbedderClient() as client:
+                await client.embed(items)
+    except Exception:
+        pass
 
 
 async def _vectors(rt: Runtime) -> dict[str, list[float]]:
@@ -625,16 +730,14 @@ async def _vectors(rt: Runtime) -> dict[str, list[float]]:
         for c in candidates:
             c.score = build.score(c, weights(), p)
         if p.geometry:
-            todo = sorted((c for c in candidates if c.sim is None and c.track.source == "dz"),
+            now = time.monotonic()
+            todo = sorted((c for c in candidates if c.sim is None and c.track.source == "dz"
+                           and rt.asked.get(c.key, 0) < now - ASK_AGAIN_S),
                           key=lambda c: -c.score)[:EMBED_NEW]
-            urls = await asyncio.gather(*(build._preview(c.track) for c in todo))
-            items = [{"key": c.key, "url": url} for c, url in zip(todo, urls, strict=True) if url]
-            if items:
-                try:
-                    async with embedder.EmbedderClient() as client:
-                        await client.embed(items)
-                except embedder.EmbedderDown:
-                    pass
+            if todo and (rt.embed_task is None or rt.embed_task.done()):
+                for c in todo:
+                    rt.asked[c.key] = now
+                rt.embed_task = asyncio.create_task(_embed_previews_bg(todo))
         return rt.vectors
     if not embedder.configured() or not (st.pos or st.neg):
         return rt.vectors
@@ -948,6 +1051,8 @@ async def clear_old(s: AsyncSession, now: datetime | None = None) -> int:
         if (rt := _rt.pop(row.id, None)) is not None:
             for t in rt.tasks:
                 t.cancel()
+            if rt.embed_task is not None:
+                rt.embed_task.cancel()
     return len(rows)
 
 
@@ -965,6 +1070,39 @@ async def start(user: User, seed: dict[str, Any] | None, mode: str | None, *, or
     seed_track, seed_artist = await _seed(seed, user) if seed else (None, None)
     async with session_scope() as s:
         profile = await build_profile(s, user, model=cfg.taste_model)
+        recent_fps: set[str] = set()
+        try:
+            evs = (await s.execute(
+                select(PlayEvent)
+                .where(PlayEvent.user_id == user.id, PlayEvent.ts >= utcnow() - timedelta(hours=24))
+                .order_by(PlayEvent.ts.desc())
+                .limit(50)
+            )).scalars().all()
+            for ev in evs:
+                meta = ev.track_metadata or {}
+                if isinstance(meta, str):
+                    import json
+                    try:
+                        meta = json.loads(meta)
+                    except Exception:
+                        meta = {}
+                artist = meta.get("artist_credit") or (meta.get("artists") and meta["artists"][0].get("name")) or ""
+                title = meta.get("title") or ""
+                if artist and title:
+                    recent_fps.add(fingerprint(artist, title))
+
+            from app.models import WaveItem
+            items = (await s.execute(
+                select(WaveItem)
+                .where(WaveItem.user_id == user.id)
+                .order_by(WaveItem.id.desc())
+                .limit(40)
+            )).scalars().all()
+            for item in items:
+                if item.artist and item.title:
+                    recent_fps.add(fingerprint(item.artist, item.title))
+        except Exception as e:
+            log.warning("Failed to query recent play history: %s", e)
     if isinstance(profile, V2Profile):
         from app.mixes.taste_select import prepare
         await prepare(profile)
@@ -978,16 +1116,21 @@ async def start(user: User, seed: dict[str, Any] | None, mode: str | None, *, or
         if profile.empty or not seeds:
             raise WaveError(409, "Волне не от чего оттолкнуться: послушайте что-нибудь или выберите исполнителей")
     sid = uuid.uuid4().hex[:16]
-    rt = Runtime(user_id=user.id, mode=mode, state=State(taste_model=cfg.taste_model), profile=profile)
+    rt = Runtime(user_id=user.id, mode=mode, state=State(taste_model=cfg.taste_model), profile=profile,
+                 profile_epoch=profile_epoch(user.id))
+    rt.state.heard.update(recent_fps)
     rt.state.seeds_used = [t.key for t in seeds]
     rt.state.seed_artist = artist_key(seed_artist["name"]) if seed_artist else None
     seed_json = ({"ref": seed_track.ref, "artist": seed_track.artist, "title": seed_track.title} if seed_track
                  else {k: v for k, v in (("artist_ref", seed_artist.get("ref")), ("artist", seed_artist["name"]),
                                          ("nd_artist_id", seed_artist.get("nd_artist_id"))) if v}
                  if seed_artist else None)
-    async with session_scope() as s:
-        s.add(WaveSession(id=sid, user_id=user.id, mode=mode, seed_json=seed_json, state_json={}, origin=origin,
-                          client=client, restart_of=restart_of, taste_model=cfg.taste_model, request_json=request))
+    async def insert_session() -> None:
+        async with session_scope() as s:
+            s.add(WaveSession(id=sid, user_id=user.id, mode=mode, seed_json=seed_json, state_json={}, origin=origin,
+                              client=client, restart_of=restart_of, taste_model=cfg.taste_model, request_json=request))
+
+    await _retry_write(f"session {sid}", insert_session)
     _rt[sid] = rt
     async with rt.lock:
         first = None
@@ -1002,13 +1145,14 @@ async def start(user: User, seed: dict[str, Any] | None, mode: str | None, *, or
         if first is not None:
             rt.state.heard.add(fp_of(first))  # the radios' copies of the seed stay out
         await _gather(sid, rt, list(generators(profile, seed_track, seed_artist, seeds).items()),
-                      lambda: len(rt.state.pool) >= 4 * BATCH)
+                      lambda: len(rt.state.pool) >= BATCH or (first is not None and len(rt.state.pool) >= 1),
+                      wait_s=1.0)
         tracks = await _hand_out(sid, rt, set(), first)
         pending = bool(rt.tasks)
     return Batch(sid, title_of(seed_json), mode, seed_json, tracks, pending)
 
 
-async def next_batch(user: User, sid: str, played: list[Any], queued: list[str]) -> Batch:
+async def next_batch(user: User, sid: str, played: list[Any], queued: list[str], held: list[str] = ()) -> Batch:
     rt = await _runtime(sid, user)
     if not rt.state.pool and rt.tasks:  # nothing to pick from yet: the sources still answer (outside the lock)
         await asyncio.wait(set(rt.tasks), timeout=get_settings().wave_wait_s)
@@ -1017,7 +1161,7 @@ async def next_batch(user: User, sid: str, played: list[Any], queued: list[str])
             recorded, events = await record(s, sid, user.id, played)
             if rt.state.taste_model == "v2":
                 events = list((await s.execute(select(PlayEvent).where(PlayEvent.user_id == user.id,
-                    PlayEvent.context == f"wave:{sid}", PlayEvent.ts <= utcnow())
+                    PlayEvent.context == f"wave:{sid}", PlayEvent.ts <= utcnow() + timedelta(minutes=5))
                     .order_by(PlayEvent.ts, PlayEvent.id))).scalars())
             row = await s.get(WaveSession, sid)
             seed_json = row.seed_json if row else None
@@ -1028,29 +1172,82 @@ async def next_batch(user: User, sid: str, played: list[Any], queued: list[str])
         st = rt.state
         if len(st.pool) < POOL_LOW:
             _refill(sid, rt)
-        tracks = await _hand_out(sid, rt, {q for q in queued if q in st.out})
+        tracks = await _hand_out(sid, rt, queued, held=held)
         pending = bool(rt.tasks)
     return Batch(sid, title_of(seed_json), rt.mode, seed_json, tracks, pending, recorded)
 
 
-async def _hand_out(sid: str, rt: Runtime, queued: set[str], first: build.Cand | None = None) -> list[build.Cand]:
-    """Picks the next batch; it becomes the client's queue (the rest of the old one goes back to the pool). Their
-    files are picked by the Hub now."""
+async def _hand_out(sid: str, rt: Runtime, queued: list[str] | set[str] = (), first: build.Cand | None = None,
+                    held: list[str] | set[str] = ()) -> list[build.Cand]:
+    """Picks the next batch: the client's upcoming `queued` tracks keep their order at the head of the answer, and
+    only as many new ones are picked as it takes to reach `BATCH` ahead. A skip that leaves enough ahead is answered
+    with the same tracks and picks nothing. `held` — refs the client's queue keeps behind the one playing: they are
+    handed out already, so a track skipped past is never picked again as new."""
     from app import listen
 
     assert rt.profile is not None
     st = rt.state
     if isinstance(rt.profile, V2Profile):
         cfg = get_settings().cfg.mixes
-        for pool in (st.pool, st.out):
-            for ref, c in list(pool.items()):
-                if not build.keep(c, rt.profile, cfg):
-                    del pool[ref]
+        # Only the pool is filtered: what the client already holds ahead stays handed out (the `queued` loop below
+        # drops the disliked ones), so a purge here cannot reshuffle the client's queue.
+        for ref, c in list(st.pool.items()):
+            if not build.keep(c, rt.profile, cfg):
+                del st.pool[ref]
         _session_weights(st, rt.profile)
+
+    queued_refs = [q for q in queued if isinstance(q, str)] if isinstance(queued, (list, tuple)) else list(queued)
+    pool_all = {**st.pool, **st.out}
+    nd_map = {c.nd_song_id: c for c in pool_all.values() if c.nd_song_id}
+
+    played_refs = {x.ref for x in st.played} | {x.nd_song_id for x in st.played if x.nd_song_id}
+    played_fps = {
+        fingerprint((x.track or {}).get("artist") or x.artist, (x.track or {}).get("title", ""))
+        for x in st.played if (x.track or x.artist)
+    } | set(st.heard)
+
+    kept_cands: list[build.Cand] = []
+    seen_kept: set[str] = set()
+    for q in queued_refs:
+        cand = pool_all.get(q) or nd_map.get(q)
+        if not cand or _disliked(cand, rt.profile):
+            continue
+        if cand.track.ref in played_refs or (cand.nd_song_id and cand.nd_song_id in played_refs):
+            continue
+        fp = fp_of(cand)
+        if fp in played_fps or fp in seen_kept:
+            continue
+        seen_kept.add(fp)
+        kept_cands.append(cand)
+
+    if first is not None and first not in kept_cands:
+        kept_cands.insert(0, first)
+
+    how_many_new = max(0, BATCH - len(kept_cands))
+
+    kept_fps = {fp_of(c) for c in kept_cands} | played_fps
+    kept_refs = {c.track.ref for c in kept_cands} | played_refs
+    for h in held:
+        if not isinstance(h, str):
+            continue
+        kept_refs.add(h)
+        if (c := pool_all.get(h) or nd_map.get(h)) is not None:
+            kept_fps.add(fp_of(c))
+
     values: dict[str, float] = {}
-    tracks = pick(st, rt.profile, rt.mode, await _vectors(rt), queued=queued, first=first, values=values)
+    new_tracks: list[build.Cand] = []
+    if how_many_new > 0:
+        new_tracks = pick(st, rt.profile, rt.mode, await _vectors(rt), n=how_many_new,
+                          queued=set(queued_refs), values=values,
+                          exclude_fps=kept_fps, exclude_refs=kept_refs)
+
+    tracks = kept_cands + new_tracks
+    answered = {c.track.ref for c in tracks}
+    started_refs = {x.ref for x in st.played}
     for ref in list(st.out):
-        st.pool[ref] = st.out.pop(ref)
+        c = st.out.pop(ref)
+        if ref not in answered and ref not in started_refs and fp_of(c) not in st.heard:
+            st.pool[ref] = c
     for c in tracks:
         st.pool.pop(c.track.ref, None)
         st.out[c.track.ref] = c
@@ -1115,6 +1312,8 @@ async def reset() -> None:
     for rt in _rt.values():
         for t in rt.tasks:
             t.cancel()
+        if rt.embed_task is not None:
+            rt.embed_task.cancel()
     _rt.clear()
 
 

@@ -291,6 +291,9 @@ async def store_snapshot(s: AsyncSession, imp: Import, snap: Snapshot) -> int:
             if ext not in seen and it.status != "skipped":
                 it.status, it.raw_json = "skipped", {**(it.raw_json or {}), "removed": True}
     await s.flush()
+    from app.plays import invalidate_taste_caches
+
+    invalidate_taste_caches(imp.user_id)
     return fresh
 
 

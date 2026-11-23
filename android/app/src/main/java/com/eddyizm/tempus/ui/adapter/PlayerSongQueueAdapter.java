@@ -9,6 +9,7 @@ import android.view.ViewGroup;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.content.res.AppCompatResources;
+import androidx.media3.common.MediaItem;
 import androidx.media3.session.MediaBrowser;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -146,6 +147,7 @@ public class PlayerSongQueueAdapter extends RecyclerView.Adapter<PlayerSongQueue
                 try {
                     MediaBrowser mediaBrowser = mediaBrowserListenableFuture.get();
                     int pos = holder.getBindingAdapterPosition();
+                    if (pos == RecyclerView.NO_POSITION || pos < 0 || pos >= songs.size()) return;
                     Child s = songs.get(pos);
                     if (currentPlayingId != null && currentPlayingId.equals(s.getId())) {
                         if (isPlaying) {
@@ -154,7 +156,21 @@ public class PlayerSongQueueAdapter extends RecyclerView.Adapter<PlayerSongQueue
                             mediaBrowser.play();
                         }
                     } else {
-                        mediaBrowser.seekTo(pos, 0);
+                        int targetPos = pos;
+                        if (mediaBrowser != null) {
+                            int count = mediaBrowser.getMediaItemCount();
+                            if (pos < count && isMatchingMediaItem(mediaBrowser.getMediaItemAt(pos), s.getId())) {
+                                targetPos = pos;
+                            } else {
+                                for (int i = 0; i < count; i++) {
+                                    if (isMatchingMediaItem(mediaBrowser.getMediaItemAt(i), s.getId())) {
+                                        targetPos = i;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        mediaBrowser.seekTo(targetPos, 0);
                         mediaBrowser.play();
                     }
                 } catch (Exception e) {
@@ -164,6 +180,11 @@ public class PlayerSongQueueAdapter extends RecyclerView.Adapter<PlayerSongQueue
 
         });
         bindPlaybackState(holder, song);
+    }
+
+    /** A row's place in `songs` is not its place in the player: the wave inserts and drops tracks ahead. */
+    private static boolean isMatchingMediaItem(@NonNull MediaItem item, @NonNull String songId) {
+        return songId.equals(item.mediaId);
     }
 
     private void bindPlaybackState(@NonNull PlayerSongQueueAdapter.ViewHolder holder, @NonNull Child song) {

@@ -299,13 +299,10 @@ public class QueueRepository {
 
             final List<Queue> finalMedia = media;
             List<Child> toAddCopy = new ArrayList<>(toAdd);
-            List<Child> filteredToAdd = toAddCopy.stream()
-                    .filter(child -> !isMediaInQueue(finalMedia, child))
-                    .collect(Collectors.toList());
 
-            for (int i = 0; i < filteredToAdd.size(); i++) {
+            for (int i = 0; i < toAddCopy.size(); i++) {
                 int idx = insertionIndex + i;
-                Queue queueItem = new Queue(filteredToAdd.get(i));
+                Queue queueItem = new Queue(toAddCopy.get(i));
                 finalMedia.add(idx, queueItem);
             }
 

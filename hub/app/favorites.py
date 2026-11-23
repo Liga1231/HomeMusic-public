@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
+from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -230,9 +231,11 @@ def fold(events: Iterable[PlayEvent], subjects: Iterable[FavoriteSubject] = (),
             st = out[k]
             st.ref, st.nd_id = subject.ref or st.ref, subject.nd_id or st.nd_id
             st.data = {**(subject.data or {}), **(st.data or {})}
+    aliases_by_root: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for typ, alias in index.parent:
+        aliases_by_root[index.root((typ, alias))].append(alias)
     for key, st in out.items():
-        st.aliases = sorted(alias for typ, alias in index.parent if typ == st.target_type and
-                            index.root((typ, alias)) == key)
+        st.aliases = sorted(aliases_by_root.get(key, []))
     return out
 
 
@@ -302,6 +305,9 @@ async def record(s: AsyncSession, user_id: int, target: FavoriteTarget, liked: b
         **target.model_dump(), user_id=user_id, event_id=eid, ts=event_time(ts or now, now) if normalize else ts or now,
         kind="like" if liked else "unlike", client=client, context=context, received_at=now,
         reverts_event_id=reverts_event_id, mirror_pending=mirror_pending).on_conflict_do_nothing())
+    from app.plays import invalidate_taste_caches
+
+    invalidate_taste_caches(user_id)
     return (await s.execute(select(PlayEvent).where(PlayEvent.user_id == user_id, PlayEvent.event_id == eid))).scalar_one()
 
 
@@ -367,6 +373,10 @@ async def command(s: AsyncSession, user: User, targets: list[FavoriteTarget], *,
     finally:
         if own_nd:
             await nd.aclose()
+    if events:
+        from app.plays import invalidate_taste_caches
+
+        invalidate_taste_caches(user.id)
     return events
 
 
@@ -512,6 +522,14 @@ async def sync_user(user: User) -> int:
         async with session_scope() as s:
             await enrich_pending_subjects(s, nd)
             await recover_import_subjects(s, user.id, body, nd)
+            # A complete but empty snapshot while the ledger holds likes is a Navidrome that lost its library
+            # (a restart with an unmounted music root), not the user unstarring everything: it must not wipe them.
+            if not any(body.get(lst) for lst in ND_LISTS.values()):
+                liked = sum(1 for st in (await snapshot(s, user.id)).values() if st.liked)
+                if liked:
+                    log.warning("favorites: Navidrome reported no starred items while %s are liked locally; "
+                                "skipping this sync", liked)
+                    return 0
             return await reconcile(s, user, body, nd=nd)
     finally:
         await nd.aclose()

@@ -1,5 +1,5 @@
 import { setListeningAccount } from './lib/plays';
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { ApiError, UNAUTHORIZED_EVENT, api, errorMessage, invalidateCache } from './api/client';
 import type { MeOut } from './api/types';
 import { MiniPlayer, PlayerSpacer } from './components/MiniPlayer';
@@ -102,10 +102,17 @@ const ROUTES: RouteDef[] = [
 
 const lastByTab: Partial<Record<Tab, string>> = {};
 
-function resolve(route: Route): { tab: Tab | null; node: ReactNode } | null {
+/** Screens that keep their query in their own state and write the URL themselves: typing in the search box or a
+ * library filter must not make a new kept-alive view, or the cache fills with copies of one screen and the other
+ * tabs are evicted (and re-fetched on return). */
+const PATH_KEYED = new Set(['/search', '/library']);
+
+function resolve(route: Route): { tab: Tab | null; node: ReactNode; key: string } | null {
   for (const [pattern, tab, render] of ROUTES) {
     const params = matchPath(pattern, route.path);
-    if (params) return { tab, node: render(params, route) };
+    if (params) {
+      return { tab, node: render(params, route), key: PATH_KEYED.has(pattern) ? route.path : route.full };
+    }
   }
   return null;
 }
@@ -162,12 +169,75 @@ export function App() {
     if (me && !resolved) navigate(START, { replace: true });
   }, [me, resolved]);
 
+  // Keep-alive cache for the last N views in RAM (avoids re-fetching & keeps DOM/scroll state)
+  const MAX_CACHED_VIEWS = 4;
+  const activeKey = resolved?.key || route.full || START;
+  const activeKeyRef = useRef(activeKey);
+  activeKeyRef.current = activeKey;
+  const scrollPositions = useRef<Record<string, number>>({});
+
+  useEffect(() => {
+    const onScroll = () => {
+      if (activeKeyRef.current) {
+        scrollPositions.current[activeKeyRef.current] = window.scrollY;
+      }
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
+
+  const [views, setViews] = useState<Map<string, { key: string; tab: Tab | null; node: ReactNode; lastActive: number }>>(() => {
+    const m = new Map();
+    if (resolved) {
+      m.set(activeKey, { key: activeKey, tab: resolved.tab, node: resolved.node, lastActive: Date.now() });
+    }
+    return m;
+  });
+
+  useEffect(() => {
+    const savedY = scrollPositions.current[activeKey] ?? 0;
+    const raf = requestAnimationFrame(() => {
+      window.scrollTo(0, savedY);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [activeKey]);
+
+  useEffect(() => {
+    if (!resolved) return;
+    setViews((prev) => {
+      const next = new Map(prev);
+      next.set(activeKey, {
+        key: activeKey,
+        tab: resolved.tab,
+        node: resolved.node,
+        lastActive: Date.now(),
+      });
+      if (next.size > MAX_CACHED_VIEWS) {
+        let oldestKey: string | null = null;
+        let oldestTime = Infinity;
+        for (const [k, v] of next) {
+          if (k !== activeKey && v.lastActive < oldestTime) {
+            oldestTime = v.lastActive;
+            oldestKey = k;
+          }
+        }
+        if (oldestKey) next.delete(oldestKey);
+      }
+      return next;
+    });
+    // `resolved` is a new object every render: depending on it re-ran this effect after each render and remounted
+    // the active screen. The URL string is the stable identity of what is rendered.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeKey, route.full]);
+
   const logout = useCallback(async () => {
     try {
       await api.logout();
     } catch {
       /* ignore: we drop the session anyway */
     }
+    setViews(new Map());
+    scrollPositions.current = {};
     invalidateCache();
     stopListening();
     resetStars();
@@ -204,10 +274,28 @@ export function App() {
   const fullPlayer = route.path === '/player';
   // the admin's analytics are wide (tables, two columns on a desktop)
   const wide = route.path.startsWith('/admin/');
+
+  const hasActiveInMap = views.has(activeKey);
+  const activeFallback = !hasActiveInMap && resolved
+    ? { key: activeKey, tab: resolved.tab, node: resolved.node, lastActive: Date.now() }
+    : null;
+  const renderViews = activeFallback ? [...views.values(), activeFallback] : Array.from(views.values());
+
   return (
     <SessionContext.Provider value={{ me, logout }}>
       <main className={cx('mx-auto min-h-dvh', wide ? 'max-w-6xl' : 'max-w-2xl', !fullPlayer && 'pb-[calc(var(--tabbar-h)+16px+env(safe-area-inset-bottom))]')}>
-        {resolved?.node}
+        {renderViews.map((v) => {
+          const isActive = v.key === activeKey;
+          return (
+            <div
+              key={v.key}
+              style={{ display: isActive ? undefined : 'none' }}
+              aria-hidden={!isActive}
+            >
+              {v.node}
+            </div>
+          );
+        })}
         {!fullPlayer && <PlayerSpacer />}
       </main>
       {!fullPlayer && (

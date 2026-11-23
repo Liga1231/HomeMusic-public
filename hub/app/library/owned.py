@@ -133,6 +133,14 @@ async def annotate_tracks(
             o.owned = True
             o.library_track_id = hit.id
             o.nd_song_id = hit.nd_song_id
+            if not o.cover_url:
+                from urllib.parse import quote
+                if hit.nd_song_id:
+                    o.cover_url = f"/api/nd/cover/{quote(hit.nd_song_id, safe='')}?size=1000"
+                    o.cover_small_url = f"/api/nd/cover/{quote(hit.nd_song_id, safe='')}?size=300"
+                elif getattr(hit, 'album_id', None):
+                    o.cover_url = f"/api/library/albums/{hit.album_id}/cover"
+                    o.cover_small_url = f"/api/library/albums/{hit.album_id}/cover?size=300" 
         else:
             o.downloading = t.ref in downloading_refs or fp in downloading_fps
             o.star_pending = t.ref in star_refs

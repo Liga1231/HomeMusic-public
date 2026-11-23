@@ -38,23 +38,31 @@ class WaveTest {
     // --- the answer goes into the queue ------------------------------------------------------
 
     @Test
-    fun anUnchangedHeadStaysAndOnlyTheRestIsReplaced() {
+    fun aheadTracksStayAndNewTracksAppend() {
         val plan = WavePlan.of(listOf("a", "b", "c"), listOf("a", "b", "x", "y", "z"))
-        assertEquals(2, plan.keep)
-        assertEquals(listOf(2), plan.remove)
+        assertEquals(3, plan.keep)
+        assertTrue(plan.remove.isEmpty())
         assertEquals(listOf(2, 3, 4), plan.add)
-        // the new ones follow the kept head
-        assertEquals(6, plan.insertAt(listOf(4, 5, 6), 7))
+        // new tracks append after the last ahead track
+        assertEquals(7, plan.insertAt(listOf(4, 5, 6), 7))
     }
 
     @Test
-    fun aNewNextTrackReplacesEverythingAhead() {
+    fun newTracksAppendWithoutReplacingAhead() {
         val plan = WavePlan.of(listOf("a", "b"), listOf("x", "a", "b"))
-        assertEquals(0, plan.keep)
-        assertEquals(listOf(0, 1), plan.remove)
-        assertEquals(listOf(0, 1, 2), plan.add)
-        // where the replaced ones were, not after a track the user put in between
-        assertEquals(3, plan.insertAt(listOf(3, 5), 6))
+        assertEquals(2, plan.keep)
+        assertTrue(plan.remove.isEmpty())
+        assertEquals(listOf(0), plan.add)
+        assertEquals(6, plan.insertAt(listOf(3, 5), 6))
+    }
+
+    @Test
+    fun tracksTheQueueKeepsBehindAreNotAddedAgain() {
+        // a fast skip or a jump to the last track: the Hub may name a track the queue still holds behind
+        val plan = WavePlan.of(listOf("c"), listOf("c", "a", "b", "x"), held = setOf("a", "b"))
+        assertEquals(1, plan.keep)
+        assertTrue(plan.remove.isEmpty())
+        assertEquals(listOf(3), plan.add)
     }
 
     @Test

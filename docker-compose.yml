@@ -46,6 +46,7 @@ services:
     build:
       context: .
       dockerfile: hub/Dockerfile
+      network: host
     image: homemusic-hub:local
     container_name: homemusic_hub
     restart: unless-stopped

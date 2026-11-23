@@ -235,11 +235,22 @@ async def _listening_metadata(s: AsyncSession, e: PlayEventIn, nd: str | None) -
     return data
 
 
+def invalidate_taste_caches(user_id: int) -> None:
+    """A ♥ or «Не нравится» changes what the liked list and the wave's profile are made of: neither cache may
+    outlive the decision that changed it."""
+    from app.api.medialib import invalidate_liked_cache
+    from app.mixes.taste import invalidate_profile_cache
+
+    invalidate_liked_cache(user_id)
+    invalidate_profile_cache(user_id)
+
+
 async def record_events(s: AsyncSession, user_id: int, raw: Iterable[Any], now: datetime | None = None) -> Recorded:
     """Stores a batch of events (`PlayEventIn` each). A malformed event is rejected alone, so a client can drop the
     whole batch it sent; an `event_id` seen before is a duplicate."""
     now = now or utcnow()
     out = Recorded()
+    taste_changed = False
     events: list[PlayEventIn] = []
     for i, item in enumerate(raw):
         try:
@@ -278,6 +289,8 @@ async def record_events(s: AsyncSession, user_id: int, raw: Iterable[Any], now: 
             out.duplicates += 1
             continue
         out.accepted += 1
+        if e.kind in ("like", "unlike", "dislike", "undislike"):
+            taste_changed = True
         if e.kind in ("like", "unlike"):
             from app.favorites import remember
             from app.api.schemas import FavoriteTarget
@@ -308,6 +321,8 @@ async def record_events(s: AsyncSession, user_id: int, raw: Iterable[Any], now: 
             if key not in after_favorites and previous.liked and previous.target_type == "track" and previous.ref:
                 from app.favorites import clear_pending
                 await clear_pending(s, user_id, previous.ref)
+    if taste_changed:
+        invalidate_taste_caches(user_id)
     return out
 
 
@@ -364,6 +379,7 @@ async def add_dislike(s: AsyncSession, user_id: int, *, ref: str | None = None, 
         row.ref, row.nd_song_id = row.ref or ref, row.nd_song_id or nd_song_id
     row.artist, row.title = row.artist or artist, row.title or title
     await s.flush()
+    invalidate_taste_caches(user_id)
     return row
 
 
@@ -375,6 +391,8 @@ async def remove_dislikes(s: AsyncSession, user_id: int, *, ref: str | None = No
     if cond is None:
         return 0
     res = await s.execute(delete(Dislike).where(Dislike.user_id == user_id, cond))
+    if res.rowcount:
+        invalidate_taste_caches(user_id)
     return res.rowcount or 0
 
 

@@ -35,15 +35,17 @@ async def geometry_scores(p: V2Profile, candidates, extra_keys=()):
     """One operation, one mean. Any stale batch discards every old coordinate, then retries once."""
     for c in candidates:
         c.sim = None
-    p.geometry = None
     if not embedder.configured():
+        p.geometry = None
         return {}
     positive, negative = source_weights(p)
     keys = list(dict.fromkeys([*(c.key for c in candidates), *extra_keys]))
+    geometry = p.geometry
     for attempt in range(2):
         try:
             async with embedder.EmbedderClient() as client:
-                geometry = await client.profile_v2(positive, negative)
+                if geometry is None:
+                    geometry = await client.profile_v2(positive, negative)
                 similarity = await client.similarity_v2([c.key for c in candidates], geometry)
                 vectors = await client.vectors_v2(keys, geometry)
             # Publish only after every batch succeeds, never partial results from a stale space.
@@ -52,10 +54,12 @@ async def geometry_scores(p: V2Profile, candidates, extra_keys=()):
                 c.sim = similarity.scores.get(c.key)
             return vectors.vectors
         except embedder.EmbedderSpaceExpired:
+            geometry = None
             if attempt:
                 break
         except embedder.EmbedderDown:
             break
+    p.geometry = None
     return {}
 
 

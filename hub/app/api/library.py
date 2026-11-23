@@ -252,6 +252,11 @@ async def starred(user: User = Depends(current_user), s: AsyncSession = Depends(
 
 @router.post("/api/star")
 async def star(body: StarIn, user: User = Depends(current_user), s: AsyncSession = Depends(get_session, scope="function")):
+    try:
+        from app.api.medialib import invalidate_liked_cache
+        invalidate_liked_cache(user.id)
+    except Exception:
+        pass
     from app.api.schemas import FavoriteTarget
     from app.favorites import command
 

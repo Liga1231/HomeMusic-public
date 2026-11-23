@@ -210,6 +210,9 @@ async def refresh_items(s: AsyncSession, imp: Import) -> None:
         if lib is not None:
             it.status, it.track_id = "done", lib.id
     await s.flush()
+    from app.plays import invalidate_taste_caches
+
+    invalidate_taste_caches(imp.user_id)
 
 
 # --- Navidrome ------------------------------------------------------------------------------------------------
